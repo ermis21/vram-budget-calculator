@@ -1,0 +1,29 @@
+name: mistralai/Mixtral-8x7B-v0.1
+family: transformer-decoder
+
+vocab:
+  size: 32000
+  tied_embeddings: false
+  ple:
+    enabled: false
+
+hidden_size: 4096
+num_hidden_layers: 32
+
+ffn:
+  kind: gated_silu
+  intermediate_size: 14336    # ignored in MoE path; expert_intermediate_size is used
+  moe:
+    enabled: true
+    num_experts: 8
+    num_active_experts: 2
+    expert_intermediate_size: 14336
+    num_shared_experts: 0
+
+attention:
+  pattern: full
+  num_attention_heads: 32
+  num_key_value_heads: 8
+  head_dim: 128
+  rope:
+    base_swa: 1000000.0

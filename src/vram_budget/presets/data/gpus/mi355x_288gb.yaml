@@ -1,0 +1,8 @@
+name: AMD Instinct MI355X 288 GB
+vendor: amd
+gen: cdna4
+vram_gb: 288.0              # 288 GB HBM3E
+bf16_tflops: 2300.0         # AMD claims ~2× MI325X bf16 throughput
+fp8_tflops: 4600.0
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 3.0

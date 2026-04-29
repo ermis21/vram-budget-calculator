@@ -1,0 +1,8 @@
+name: NVIDIA RTX A6000 48 GB
+vendor: nvidia
+gen: ampere-pro
+vram_gb: 48.0
+bf16_tflops: 75.0
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 1.0

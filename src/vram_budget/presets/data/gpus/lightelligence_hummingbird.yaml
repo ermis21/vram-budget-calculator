@@ -1,0 +1,10 @@
+name: Lightelligence Hummingbird (photonic)
+vendor: lightelligence
+gen: photonic
+# Hummingbird is Lightelligence's photonic AI accelerator targeting large-
+# matrix workloads. Public bf16 numbers are approximate.
+vram_gb: 64.0
+bf16_tflops: 300.0
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 1.5

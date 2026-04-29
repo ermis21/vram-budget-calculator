@@ -1,0 +1,17 @@
+kind: lora
+optimizer:
+  name: adamw_bf16
+precision:
+  weights: bf16          # base weights stay bf16, frozen
+  master: null
+  grads: bf16
+  loss_chunk_size: null
+grad_checkpoint: sqrt
+seq_len: 4096
+batch_size: 1
+grad_accum_steps: 16
+lora:
+  rank: 16
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+overhead_train_gb: 1.5
+overhead_infer_gb: 0.5

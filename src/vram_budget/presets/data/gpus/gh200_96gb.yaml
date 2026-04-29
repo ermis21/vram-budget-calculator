@@ -1,0 +1,9 @@
+name: NVIDIA GH200 Grace Hopper Superchip 96 GB
+vendor: nvidia
+gen: hopper-datacenter
+vram_gb: 96.0               # 96 GB HBM3 on the Hopper die; Grace CPU adds 480 GB LPDDR5X (system RAM)
+bf16_tflops: 600.0
+fp8_tflops: 1200.0
+multi: { num_gpus: 1, parallelism: single }
+system_ram_gb: 480.0        # Grace CPU memory accessible at NVLink-C2C bandwidth
+safety_buffer_gb: 1.5

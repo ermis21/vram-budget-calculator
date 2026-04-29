@@ -1,0 +1,8 @@
+name: Tenstorrent Wormhole n300 24 GB
+vendor: tenstorrent
+gen: wormhole
+vram_gb: 24.0               # 12 GB GDDR6 per chip; n300 PCIe card has 2 chips → 24 GB
+bf16_tflops: 131.0          # claimed bf16 dense
+fp8_tflops: 262.0
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 1.0

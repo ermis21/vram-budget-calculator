@@ -1,0 +1,8 @@
+name: AMD Instinct MI210 64 GB
+vendor: amd
+gen: cdna2
+vram_gb: 64.0
+bf16_tflops: 181.0          # AMD spec
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 1.0

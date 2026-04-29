@@ -1,0 +1,55 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vram-budget"
+version = "0.1.0"
+description = "Universal training-VRAM calculator for transformer fine-tuning. YAML-driven, frontier-search-first."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+authors = [{ name = "vram-budget contributors" }]
+keywords = ["llm", "training", "vram", "memory", "calculator", "transformer", "finetuning", "lora", "qlora", "moe"]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+dependencies = [
+    "pydantic>=2.5",
+    "pyyaml>=6.0",
+    "rich>=13.7",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.4",
+    "pytest-cov>=4.1",
+]
+calibrate = [
+    "torch>=2.1",
+]
+
+[project.scripts]
+vram-budget = "vram_budget.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/your-org/vram-budget"
+Issues = "https://github.com/your-org/vram-budget/issues"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.setuptools.package-data]
+"vram_budget.presets" = ["data/**/*.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-q"

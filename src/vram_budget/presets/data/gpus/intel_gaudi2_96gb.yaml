@@ -1,0 +1,8 @@
+name: Intel Gaudi 2 96 GB HBM2E
+vendor: intel
+gen: gaudi
+vram_gb: 96.0
+bf16_tflops: 432.0          # Habana spec — bf16 dense
+fp8_tflops: 865.0
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 1.5

@@ -1,0 +1,26 @@
+name: Qwen/Qwen1.5-MoE-A2.7B  (architecture template)
+family: transformer-decoder
+
+# This is the Qwen1.5-MoE-A2.7B / Qwen2-57B-A14B family: dense attention,
+# many experts with a *shared* always-on expert (DeepSeek style).
+vocab: { size: 151936, tied_embeddings: false, ple: { enabled: false } }
+hidden_size: 2048
+num_hidden_layers: 24
+
+ffn:
+  kind: gated_silu
+  intermediate_size: 5632          # ignored when MoE is on
+  moe:
+    enabled: true
+    num_experts: 60                # 60 fine-grained experts
+    num_active_experts: 4          # top-4
+    expert_intermediate_size: 1408  # smaller than dense FFN — fine-grained MoE
+    num_shared_experts: 4          # always-on shared experts
+    router_bytes_per_param: 2.0
+
+attention:
+  pattern: full
+  num_attention_heads: 16
+  num_key_value_heads: 16
+  head_dim: 128
+  rope: { base_swa: 1000000.0 }

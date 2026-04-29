@@ -1,0 +1,8 @@
+name: AMD Radeon RX 6900 XT 16 GB
+vendor: amd
+gen: rdna2
+vram_gb: 16.0
+bf16_tflops: 28.0
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 0.5

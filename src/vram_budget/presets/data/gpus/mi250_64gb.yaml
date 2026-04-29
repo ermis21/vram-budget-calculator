@@ -1,0 +1,8 @@
+name: AMD Instinct MI250 64 GB (per OAM, dual-die)
+vendor: amd
+gen: cdna2
+vram_gb: 64.0               # per die; the OAM module has 128GB total across 2 dies
+bf16_tflops: 180.0
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 1.5

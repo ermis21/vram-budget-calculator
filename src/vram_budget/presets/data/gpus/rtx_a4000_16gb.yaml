@@ -1,0 +1,8 @@
+name: NVIDIA RTX A4000 16 GB
+vendor: nvidia
+gen: ampere-pro
+vram_gb: 16.0
+bf16_tflops: 38.0
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 0.5

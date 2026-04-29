@@ -1,0 +1,8 @@
+name: NVIDIA RTX 4080 16 GB
+vendor: nvidia
+gen: ada-consumer
+vram_gb: 16.0
+bf16_tflops: 130.0
+fp8_tflops: 260.0
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 0.5

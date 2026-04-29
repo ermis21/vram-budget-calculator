@@ -1,0 +1,8 @@
+name: AMD Radeon Pro W7800 32 GB
+vendor: amd
+gen: rdna3-pro
+vram_gb: 32.0
+bf16_tflops: 70.0
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 0.5

@@ -1,0 +1,8 @@
+name: NVIDIA H100 80 GB PCIe
+vendor: nvidia
+gen: hopper-datacenter
+vram_gb: 80.0
+bf16_tflops: 400.0          # ~756 fp16 spec; ~400 realized in PCIe form factor
+fp8_tflops: 800.0
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 1.0

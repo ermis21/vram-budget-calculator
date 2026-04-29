@@ -1,0 +1,9 @@
+name: Apple Mac Studio M3 Ultra 512 GB
+vendor: apple
+gen: apple-silicon
+vram_gb: 384.0              # 75% of 512 GB unified
+bf16_tflops: 32.0
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+system_ram_gb: 512.0
+safety_buffer_gb: 8.0

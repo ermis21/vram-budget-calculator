@@ -1,0 +1,11 @@
+name: 8× NVIDIA A100 80 GB (FSDP ZeRO-3)
+vendor: nvidia
+gen: ampere-datacenter
+vram_gb: 80.0
+bf16_tflops: 200.0
+fp8_tflops: null
+multi:
+  num_gpus: 8
+  parallelism: fsdp_zero3
+  fsdp_efficiency: 0.78           # comm overhead worsens with more GPUs
+safety_buffer_gb: 1.5

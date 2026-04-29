@@ -1,0 +1,9 @@
+name: NVIDIA DGX Spark (GB10) 128 GB
+vendor: nvidia
+gen: dgx-station
+vram_gb: 128.0              # unified LPDDR5X; CPU and GPU share the same coherent pool
+bf16_tflops: 250.0          # ~1 PFLOPs fp4 sparse spec; ~250 TFLOPs bf16 dense estimate
+fp8_tflops: 500.0
+multi: { num_gpus: 1, parallelism: single }
+system_ram_gb: 128.0
+safety_buffer_gb: 3.0       # part of unified pool is reserved for the OS / kernel

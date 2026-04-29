@@ -1,0 +1,8 @@
+name: NVIDIA H100 NVL 94 GB
+vendor: nvidia
+gen: hopper-datacenter
+vram_gb: 94.0               # PCIe card with 94 GB HBM3 (the LLM-optimized SKU)
+bf16_tflops: 500.0
+fp8_tflops: 1000.0
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 1.0

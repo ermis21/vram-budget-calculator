@@ -1,0 +1,9 @@
+name: NVIDIA Jetson AGX Orin 64 GB
+vendor: nvidia
+gen: jetson
+vram_gb: 64.0               # unified LPDDR5; GPU shares with CPU
+bf16_tflops: 17.0           # ~85 TFLOPs sparse INT8; ~17 realized bf16 dense
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+system_ram_gb: 64.0         # same physical RAM is the system memory
+safety_buffer_gb: 2.0       # OS, runtime, and image buffers eat more on edge boards

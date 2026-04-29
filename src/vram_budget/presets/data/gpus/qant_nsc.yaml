@@ -1,0 +1,12 @@
+name: Q.ANT Native Photonic Computing (NSC)
+vendor: qant
+gen: photonic
+# Q.ANT's first-gen photonic processor (Native Server Card) targets matrix-
+# multiply workloads with photonic crossbars. Numbers here are speculative —
+# the company has published throughput claims but no broadly-reproduced
+# bf16 LLM-training benchmarks yet.
+vram_gb: 32.0
+bf16_tflops: 50.0           # very approximate
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 1.0

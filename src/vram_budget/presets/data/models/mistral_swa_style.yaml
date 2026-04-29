@@ -1,0 +1,23 @@
+# Mistral-style sliding-window-only template.
+#
+# Uniform sliding-window attention (vs. Gemma's hybrid). Useful for "what if
+# we used SWA-only at this scale?" sweeps.
+name: mistral-swa-style-template
+family: transformer-decoder
+
+vocab: { size: 32000, tied_embeddings: false, ple: { enabled: false } }
+hidden_size: 2048
+num_hidden_layers: 24
+
+ffn:
+  kind: gated_silu
+  ffn_ratio: 3.5
+  moe: { enabled: false }
+
+attention:
+  pattern: swa
+  num_attention_heads: 32
+  num_key_value_heads: 8
+  head_dim: 128
+  sliding_window: 4096
+  rope: { base_swa: 1000000.0 }

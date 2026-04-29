@@ -1,0 +1,9 @@
+name: Apple Mac Studio M3 Ultra 192 GB
+vendor: apple
+gen: apple-silicon
+vram_gb: 144.0
+bf16_tflops: 32.0
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+system_ram_gb: 192.0
+safety_buffer_gb: 4.0

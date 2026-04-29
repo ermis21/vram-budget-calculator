@@ -1,0 +1,8 @@
+name: NVIDIA RTX 3080 12 GB
+vendor: nvidia
+gen: ampere-consumer
+vram_gb: 12.0
+bf16_tflops: 34.0
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 0.3

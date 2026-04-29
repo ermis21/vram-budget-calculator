@@ -1,0 +1,8 @@
+name: AMD Instinct MI300X 192 GB
+vendor: amd
+gen: cdna3
+vram_gb: 192.0
+bf16_tflops: 750.0          # realized bf16 dense; spec ~1300
+fp8_tflops: 1500.0          # realized fp8 dense
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 2.0

@@ -1,0 +1,9 @@
+name: AMD Ryzen AI Max+ 395 (Strix Halo) 128 GB
+vendor: amd
+gen: strix-halo
+vram_gb: 96.0               # ~75% of 128 GB LPDDR5X unified can be wired as GPU memory
+bf16_tflops: 50.0           # ~50 TFLOPs RDNA 3.5 fp16 dense; bf16 supported on RDNA 3.5
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+system_ram_gb: 128.0
+safety_buffer_gb: 4.0

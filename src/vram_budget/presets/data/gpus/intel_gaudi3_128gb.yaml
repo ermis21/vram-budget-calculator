@@ -1,0 +1,8 @@
+name: Intel Gaudi 3 128 GB HBM2E
+vendor: intel
+gen: gaudi
+vram_gb: 128.0
+bf16_tflops: 1850.0         # Intel claim, fp16/bf16 dense
+fp8_tflops: 1850.0
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 2.0

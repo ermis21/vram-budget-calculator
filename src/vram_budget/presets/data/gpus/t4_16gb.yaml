@@ -1,0 +1,8 @@
+name: NVIDIA T4 16 GB
+vendor: nvidia
+gen: turing-datacenter
+vram_gb: 16.0
+bf16_tflops: 30.0           # fp16; bf16 not supported (use fp16 in mixed precision)
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 0.5

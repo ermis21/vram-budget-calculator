@@ -1,0 +1,8 @@
+name: NVIDIA RTX 5000 Ada Generation 32 GB
+vendor: nvidia
+gen: ada-pro
+vram_gb: 32.0
+bf16_tflops: 65.0
+fp8_tflops: 130.0
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 0.5

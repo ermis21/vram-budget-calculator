@@ -1,0 +1,14 @@
+kind: full
+optimizer:
+  name: adamw_fp32
+precision:
+  weights: fp32          # full fp32 — old-school, eats memory
+  master: null           # weights ARE master
+  grads: fp32
+  loss_chunk_size: null
+grad_checkpoint: sqrt
+seq_len: 2048
+batch_size: 1
+grad_accum_steps: 16
+overhead_train_gb: 1.5
+overhead_infer_gb: 0.5

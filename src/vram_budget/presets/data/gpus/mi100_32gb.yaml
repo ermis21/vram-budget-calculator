@@ -1,0 +1,8 @@
+name: AMD Instinct MI100 32 GB
+vendor: amd
+gen: cdna1
+vram_gb: 32.0
+bf16_tflops: 92.0           # ~184 fp16 spec; ~92 realized
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 1.0

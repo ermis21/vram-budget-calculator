@@ -1,0 +1,10 @@
+name: NVIDIA RTX 4090 24 GB
+vendor: nvidia
+gen: ada-consumer
+vram_gb: 24.0
+bf16_tflops: 165.0          # realized; spec ~330 fp16 dense
+fp8_tflops: 330.0
+multi:
+  num_gpus: 1
+  parallelism: single
+safety_buffer_gb: 0.5

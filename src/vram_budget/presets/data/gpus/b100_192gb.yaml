@@ -1,0 +1,8 @@
+name: NVIDIA B100 192 GB SXM
+vendor: nvidia
+gen: blackwell-datacenter
+vram_gb: 192.0
+bf16_tflops: 1000.0         # ~1.75 PFLOPs fp16 dense spec; ~1.0 realized
+fp8_tflops: 2000.0
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 2.0

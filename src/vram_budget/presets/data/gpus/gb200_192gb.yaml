@@ -1,0 +1,9 @@
+name: NVIDIA GB200 Grace Blackwell (per Blackwell die)
+vendor: nvidia
+gen: blackwell-datacenter
+vram_gb: 192.0              # per Blackwell GPU; the GB200 module pairs 2 GPUs + 1 Grace CPU
+bf16_tflops: 1300.0
+fp8_tflops: 2600.0
+multi: { num_gpus: 1, parallelism: single }
+system_ram_gb: 480.0        # Grace CPU LPDDR5X
+safety_buffer_gb: 2.0

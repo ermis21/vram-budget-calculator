@@ -1,0 +1,9 @@
+name: NVIDIA DGX Station (B300, 768 GB unified)
+vendor: nvidia
+gen: dgx-station
+vram_gb: 768.0              # unified Grace + Blackwell coherent pool
+bf16_tflops: 5000.0         # ~20 PFLOPs fp4; estimate at ~5 PFLOPs bf16 dense
+fp8_tflops: 10000.0
+multi: { num_gpus: 1, parallelism: single }
+system_ram_gb: 768.0
+safety_buffer_gb: 5.0

@@ -1,0 +1,8 @@
+name: NVIDIA RTX 4060 8 GB
+vendor: nvidia
+gen: ada-consumer
+vram_gb: 8.0
+bf16_tflops: 22.0
+fp8_tflops: 44.0
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 0.3

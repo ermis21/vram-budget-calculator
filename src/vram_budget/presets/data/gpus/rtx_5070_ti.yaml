@@ -1,0 +1,8 @@
+name: NVIDIA RTX 5070 Ti 16 GB
+vendor: nvidia
+gen: blackwell-consumer
+vram_gb: 16.0
+bf16_tflops: 150.0
+fp8_tflops: 300.0
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 0.5

@@ -1,0 +1,9 @@
+name: Apple Mac Studio M4 Max 128 GB
+vendor: apple
+gen: apple-silicon
+vram_gb: 96.0               # 75% of 128 GB unified
+bf16_tflops: 17.0           # Metal/MPS fp16; M4 Max single-die throughput
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+system_ram_gb: 128.0
+safety_buffer_gb: 4.0

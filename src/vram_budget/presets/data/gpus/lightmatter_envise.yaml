@@ -1,0 +1,11 @@
+name: Lightmatter Envise (photonic)
+vendor: lightmatter
+gen: photonic
+# Envise uses silicon-photonic matrix-multiply cores. Claimed throughput is
+# in the hundreds of TFLOPs at very low power. Memory is HBM. Numbers are
+# approximate — measured public benchmarks are sparse.
+vram_gb: 64.0
+bf16_tflops: 450.0
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 1.5

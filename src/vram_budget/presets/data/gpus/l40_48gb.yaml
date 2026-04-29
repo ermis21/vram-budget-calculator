@@ -1,0 +1,8 @@
+name: NVIDIA L40 48 GB
+vendor: nvidia
+gen: ada-datacenter
+vram_gb: 48.0
+bf16_tflops: 120.0
+fp8_tflops: 240.0
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 1.0

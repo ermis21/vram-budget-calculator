@@ -1,0 +1,19 @@
+kind: qlora
+optimizer:
+  name: adamw_8bit       # bitsandbytes paged 8-bit AdamW
+precision:
+  weights: bf16          # adapters stored bf16; frozen base is qlora.base_quant_bits
+  master: null
+  grads: bf16
+  loss_chunk_size: 128   # mitigates fp32 logits promotion at long sequences
+grad_checkpoint: sqrt
+seq_len: 4096
+batch_size: 1
+grad_accum_steps: 16
+lora:
+  rank: 16
+  target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
+qlora:
+  base_quant_bits: 4     # NF4 / FP4 frozen base
+overhead_train_gb: 1.5
+overhead_infer_gb: 0.5

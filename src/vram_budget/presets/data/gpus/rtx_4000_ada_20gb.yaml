@@ -1,0 +1,8 @@
+name: NVIDIA RTX 4000 Ada Generation 20 GB
+vendor: nvidia
+gen: ada-pro
+vram_gb: 20.0
+bf16_tflops: 26.0
+fp8_tflops: 52.0
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 0.5

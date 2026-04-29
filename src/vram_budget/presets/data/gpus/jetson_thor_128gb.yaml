@@ -1,0 +1,9 @@
+name: NVIDIA Jetson Thor 128 GB
+vendor: nvidia
+gen: jetson
+vram_gb: 128.0              # unified LPDDR5X
+bf16_tflops: 50.0           # ~2 PFLOPs fp4 sparse; ~50 realized bf16 dense estimate
+fp8_tflops: 200.0
+multi: { num_gpus: 1, parallelism: single }
+system_ram_gb: 128.0
+safety_buffer_gb: 3.0

@@ -1,0 +1,47 @@
+# Template — copy this and tweak whatever you want.
+#
+# This file describes a Gemma-style hybrid-attention model (mostly sliding-window,
+# every 6th layer global) with PLE and dual RoPE. For a vanilla Llama, switch
+# attention.pattern to "full" and disable PLE.
+
+name: my-custom-arch
+family: transformer-decoder
+
+vocab:
+  size: 128000
+  tied_embeddings: true
+  ple:
+    enabled: true
+    dim: 256                  # Per-Layer Embedding dimension (Gemma 3/4 PLE)
+    vocab_size: null          # null → same as vocab.size
+
+hidden_size: 2048
+num_hidden_layers: 32
+
+ffn:
+  kind: gated_silu            # gated_silu | gelu | relu_squared
+  intermediate_size: 8192
+  moe:
+    enabled: false
+    num_experts: 0
+    num_active_experts: 0
+    expert_intermediate_size: 0
+    num_shared_experts: 0
+    router_bytes_per_param: 2.0
+
+attention:
+  pattern: hybrid             # full | swa | hybrid
+  num_attention_heads: 16
+  num_key_value_heads: 4      # GQA 4:1
+  head_dim: 128               # SWA head_dim (also default for non-hybrid)
+  global_head_dim: null       # only for hybrid w/ different dim per attn type
+  sliding_window: 1024
+  swa_global_ratio: 5         # 5 SWA per 1 global; final layer always global
+  num_kv_shared_layers: 0     # last N layers reuse upstream K, V (Gemma 4)
+  rope:
+    base_swa: 10000.0
+    base_global: 1000000.0    # different RoPE base for global layers (Gemma 3)
+
+# Optional mixed-precision-by-layer schedule. Most users won't need this.
+weight_precision_schedule:
+  enabled: false

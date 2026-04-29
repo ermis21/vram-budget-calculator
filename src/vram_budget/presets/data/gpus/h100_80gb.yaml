@@ -1,0 +1,10 @@
+name: NVIDIA H100 80 GB SXM
+vendor: nvidia
+gen: hopper-datacenter
+vram_gb: 80.0
+bf16_tflops: 600.0          # realized bf16 dense; spec ~989
+fp8_tflops: 1200.0          # realized fp8 dense
+multi:
+  num_gpus: 1
+  parallelism: single
+safety_buffer_gb: 1.0

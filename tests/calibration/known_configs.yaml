@@ -1,0 +1,64 @@
+# Calibration suite: published configurations with documented memory numbers.
+#
+# Each entry pins a (gpu, arch, method, seq_len) tuple and asserts that our
+# prediction lands within ±tolerance_pct of `published_train_gb`. CI fails on
+# drift so changes to the math don't silently break accuracy.
+#
+# Numbers come from official model cards, HuggingFace blogs, paper appendices,
+# and well-known training-recipe repositories. When two sources disagree we
+# keep the median and widen the tolerance.
+
+probes:
+  - label: "Llama-2 7B QLoRA on 24 GB consumer (Tim Dettmers, 2023)"
+    gpu: rtx_4090
+    arch: llama2_7b
+    method: qlora_4bit
+    seq_len: 4096
+    published_train_gb: 7.5         # QLoRA paper: 6-8 GB depending on rank/seq
+    tolerance_pct: 25
+    expected_fits: true
+
+  - label: "Llama-3 8B QLoRA on 24 GB consumer"
+    gpu: rtx_4090
+    arch: llama3_8b
+    method: qlora_4bit
+    seq_len: 4096
+    published_train_gb: 7.0         # similar size to Llama-2 7B; ~7 GB observed
+    tolerance_pct: 25
+    expected_fits: true
+
+  - label: "Llama-3 8B full FT on 8× A100 ZeRO-3 (DeepSpeed)"
+    gpu: 8x_a100_80gb_zero3
+    arch: llama3_8b
+    method: full_ft_bf16
+    seq_len: 4096
+    published_train_gb: 17.0        # ~15-25 GB/GPU; depends on shard granularity
+    tolerance_pct: 30
+    expected_fits: true
+
+  - label: "Mistral 7B full FT on single A100 80 GB"
+    gpu: a100_80gb
+    arch: mistral_7b
+    method: full_ft_bf16
+    seq_len: 2048
+    published_train_gb: 88.0        # 7B with fp32 master needs ~80-100 GB; doesn't fit
+    tolerance_pct: 20
+    expected_fits: false
+
+  - label: "Gemma-3 1B full FT on 16 GB consumer"
+    gpu: rtx_4060_ti_16gb
+    arch: gemma3_1b
+    method: full_ft_bf16
+    seq_len: 2048
+    published_train_gb: 14.0
+    tolerance_pct: 25
+    expected_fits: true
+
+  - label: "Mixtral 8x7B QLoRA on A100 80 GB"
+    gpu: a100_80gb
+    arch: mixtral_8x7b
+    method: qlora_4bit
+    seq_len: 2048
+    published_train_gb: 30.0        # active-only adapters tiny; weights frozen ~24 GB
+    tolerance_pct: 35
+    expected_fits: true

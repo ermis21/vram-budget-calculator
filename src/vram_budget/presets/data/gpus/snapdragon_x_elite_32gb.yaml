@@ -1,0 +1,9 @@
+name: Qualcomm Snapdragon X Elite (Adreno X1 + Hexagon NPU) 32 GB
+vendor: qualcomm
+gen: adreno-x
+vram_gb: 24.0               # 32 GB LPDDR5X unified; Adreno can wire ~75%
+bf16_tflops: 5.0            # Adreno X1 GPU only; the 45 TOPS NPU is INT8-only and not used here
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+system_ram_gb: 32.0
+safety_buffer_gb: 2.0

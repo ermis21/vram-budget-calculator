@@ -1,0 +1,8 @@
+name: NVIDIA RTX 5090 32 GB
+vendor: nvidia
+gen: blackwell-consumer
+vram_gb: 32.0
+bf16_tflops: 250.0          # estimated; spec ~419 fp16 dense
+fp8_tflops: 500.0
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 0.5

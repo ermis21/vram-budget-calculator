@@ -1,0 +1,28 @@
+name: mistralai/Mistral-7B-v0.1
+family: transformer-decoder
+
+vocab:
+  size: 32000
+  tied_embeddings: false
+  ple:
+    enabled: false
+
+hidden_size: 4096
+num_hidden_layers: 32
+
+ffn:
+  kind: gated_silu
+  intermediate_size: 14336
+  moe:
+    enabled: false
+
+attention:
+  # v0.1 used uniform sliding-window (4096); v0.2+ moved to full attention.
+  # We model v0.1 here because it's the most-cited "fits in consumer VRAM" target.
+  pattern: swa
+  num_attention_heads: 32
+  num_key_value_heads: 8
+  head_dim: 128
+  sliding_window: 4096
+  rope:
+    base_swa: 10000.0

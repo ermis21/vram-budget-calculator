@@ -1,0 +1,8 @@
+name: AMD Instinct MI250X 128 GB OAM
+vendor: amd
+gen: cdna2
+vram_gb: 128.0              # full OAM module (2 dies × 64 GB); single-namespace via Infinity Fabric
+bf16_tflops: 380.0
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 2.0

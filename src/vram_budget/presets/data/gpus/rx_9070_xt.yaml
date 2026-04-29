@@ -1,0 +1,8 @@
+name: AMD Radeon RX 9070 XT 16 GB
+vendor: amd
+gen: rdna4
+vram_gb: 16.0
+bf16_tflops: 90.0           # RDNA4 added native bf16; spec ~195 fp16 sparse
+fp8_tflops: 180.0
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 0.5

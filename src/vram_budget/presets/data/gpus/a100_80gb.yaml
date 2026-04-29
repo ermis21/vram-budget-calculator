@@ -1,0 +1,10 @@
+name: NVIDIA A100 80 GB
+vendor: nvidia
+gen: ampere-datacenter
+vram_gb: 80.0
+bf16_tflops: 200.0          # realized bf16 dense; spec 312
+fp8_tflops: null
+multi:
+  num_gpus: 1
+  parallelism: single
+safety_buffer_gb: 1.0

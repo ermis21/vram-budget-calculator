@@ -1,0 +1,14 @@
+kind: full
+optimizer:
+  name: adamw_bf16
+precision:
+  weights: bf16
+  master: fp32          # mixed-precision: fp32 master copy alongside bf16 weights
+  grads: bf16
+  loss_chunk_size: null
+grad_checkpoint: sqrt
+seq_len: 4096
+batch_size: 1
+grad_accum_steps: 16
+overhead_train_gb: 1.5
+overhead_infer_gb: 0.5

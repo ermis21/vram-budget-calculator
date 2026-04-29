@@ -1,0 +1,8 @@
+name: NVIDIA RTX 3050 8 GB
+vendor: nvidia
+gen: ampere-consumer
+vram_gb: 8.0
+bf16_tflops: 9.0           # ~9 TFLOPs fp16 dense; spec ~18 TFLOPs sparse
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 0.3

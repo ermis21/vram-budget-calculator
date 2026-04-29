@@ -1,0 +1,9 @@
+name: AMD Instinct MI300A 128 GB APU
+vendor: amd
+gen: cdna3
+vram_gb: 128.0              # CPU + GPU share unified HBM3
+bf16_tflops: 980.0
+fp8_tflops: 1960.0
+multi: { num_gpus: 1, parallelism: single }
+system_ram_gb: 128.0        # APU: same physical HBM is the system memory
+safety_buffer_gb: 2.0

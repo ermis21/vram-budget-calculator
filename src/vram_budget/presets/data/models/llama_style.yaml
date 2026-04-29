@@ -1,0 +1,28 @@
+# Llama-style architecture template (no fixed sizes).
+#
+# Use this with `vram-budget frontier` to sweep your own dimensions:
+#
+#   vram-budget frontier --gpu rtx_4090 --arch-template llama_style \
+#     --focal hidden_size --values 1024,2048,4096 \
+#     --free 'num_hidden_layers=24,32,40 ; attention.num_attention_heads=16,32'
+#
+# The defaults below are placeholders — they only matter for knobs you don't
+# sweep. FFN auto-scales with hidden_size via ffn_ratio.
+name: llama-style-template
+family: transformer-decoder
+
+vocab: { size: 128000, tied_embeddings: false, ple: { enabled: false } }
+hidden_size: 2048
+num_hidden_layers: 24
+
+ffn:
+  kind: gated_silu
+  ffn_ratio: 3.5            # auto-derives intermediate_size = hidden × 3.5
+  moe: { enabled: false }
+
+attention:
+  pattern: full
+  num_attention_heads: 32
+  num_key_value_heads: 8    # GQA 4:1 (Llama-3 style)
+  head_dim: 128
+  rope: { base_swa: 500000.0 }

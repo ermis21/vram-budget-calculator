@@ -1,0 +1,8 @@
+name: NVIDIA V100 32 GB SXM2
+vendor: nvidia
+gen: volta-datacenter
+vram_gb: 32.0
+bf16_tflops: 60.0           # V100 fp16 dense; bf16 not natively supported (use fp16)
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 1.0

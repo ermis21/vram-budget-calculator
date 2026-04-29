@@ -1,0 +1,8 @@
+name: AMD Radeon RX 7900 XT 20 GB
+vendor: amd
+gen: rdna3
+vram_gb: 20.0
+bf16_tflops: 50.0
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 0.5

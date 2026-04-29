@@ -1,0 +1,12 @@
+name: Groq LPU (per chip)
+vendor: groq
+gen: lpu-v1
+# Groq LPU has only 230 MB on-chip SRAM and no external HBM. Inference-only;
+# weights are sharded across many chips. The "VRAM" number below is the
+# SRAM, which is too small for any meaningful single-chip model fit. Use
+# this preset for FLOPs / inference-throughput exploration only.
+vram_gb: 0.23
+bf16_tflops: 188.0          # Groq claim: 750 TOPS INT8 → ~188 TFLOPs bf16
+fp8_tflops: 376.0
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 0.05

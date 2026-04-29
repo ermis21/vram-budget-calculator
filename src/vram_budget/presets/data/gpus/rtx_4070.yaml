@@ -1,0 +1,8 @@
+name: NVIDIA RTX 4070 12 GB
+vendor: nvidia
+gen: ada-consumer
+vram_gb: 12.0
+bf16_tflops: 60.0
+fp8_tflops: 120.0
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 0.5

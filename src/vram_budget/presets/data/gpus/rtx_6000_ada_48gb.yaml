@@ -1,0 +1,8 @@
+name: NVIDIA RTX 6000 Ada Generation 48 GB
+vendor: nvidia
+gen: ada-pro
+vram_gb: 48.0
+bf16_tflops: 165.0
+fp8_tflops: 330.0
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 1.0

@@ -1,0 +1,8 @@
+name: NVIDIA L4 24 GB
+vendor: nvidia
+gen: ada-datacenter
+vram_gb: 24.0
+bf16_tflops: 60.0
+fp8_tflops: 120.0
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 0.5

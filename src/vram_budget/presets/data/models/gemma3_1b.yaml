@@ -1,0 +1,29 @@
+name: google/gemma-3-1b
+family: transformer-decoder
+
+vocab:
+  size: 262144
+  tied_embeddings: true
+  ple:
+    enabled: false
+
+hidden_size: 1152
+num_hidden_layers: 26
+
+ffn:
+  kind: gated_silu
+  intermediate_size: 6912
+  moe:
+    enabled: false
+
+attention:
+  pattern: hybrid
+  num_attention_heads: 4
+  num_key_value_heads: 1
+  head_dim: 256
+  global_head_dim: null
+  sliding_window: 512
+  swa_global_ratio: 5
+  rope:
+    base_swa: 10000.0
+    base_global: 1000000.0

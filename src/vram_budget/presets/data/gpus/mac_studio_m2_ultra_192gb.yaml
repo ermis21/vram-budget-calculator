@@ -1,0 +1,9 @@
+name: Apple Mac Studio M2 Ultra 192 GB
+vendor: apple
+gen: apple-silicon
+vram_gb: 144.0              # ~75% of unified memory addressable by the GPU by default
+bf16_tflops: 27.0           # Metal/MPS fp16 throughput; M2 Ultra has no native bf16 — fp16 used as proxy
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+system_ram_gb: 192.0        # the full unified pool; CPU and GPU share it
+safety_buffer_gb: 4.0       # Metal driver + macOS keep ~4-8 GB outside the wired GPU limit

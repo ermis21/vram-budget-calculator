@@ -1,0 +1,8 @@
+name: NVIDIA A100 40 GB
+vendor: nvidia
+gen: ampere-datacenter
+vram_gb: 40.0
+bf16_tflops: 200.0
+fp8_tflops: null
+multi: { num_gpus: 1, parallelism: single }
+safety_buffer_gb: 1.0

@@ -1,0 +1,14 @@
+name: Cerebras WSE-3 (CS-3 system)
+vendor: cerebras
+gen: wafer-scale
+# Wafer-scale chip: 44 GB on-die SRAM. The CS-3 system pairs it with up to
+# 1.2 PB external MemoryX storage for streamed weights. Numbers below treat
+# the on-die SRAM as the "VRAM" — accurate for activations/KV but model
+# weights are streamed from MemoryX, so the calculator's weight-fit check
+# does NOT apply directly. Treat results with caution.
+vram_gb: 44.0
+bf16_tflops: 62500.0        # 125 PFLOPs sparse fp16 → ~62.5 PFLOPs dense estimate
+fp8_tflops: 125000.0
+multi: { num_gpus: 1, parallelism: single }
+system_ram_gb: 1228800.0    # MemoryX pool can scale to ~1.2 PB
+safety_buffer_gb: 4.0
