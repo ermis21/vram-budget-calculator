@@ -238,7 +238,16 @@ class ModelArchSpec(_Strict):
 # ─────────────────────────────────────────────────────────────────────────────
 
 
-ParallelismName = Literal["single", "ddp", "fsdp_zero2", "fsdp_zero3"]
+ParallelismName = Literal[
+    # Single device
+    "single",
+    # Training
+    "ddp", "fsdp_zero2", "fsdp_zero3",
+    # Inference
+    "tp",        # tensor parallel: shard weights across GPUs at the matmul level
+    "pp",        # pipeline parallel: shard layers across GPUs sequentially
+    "replicate", # each GPU holds a full copy and serves independent requests
+]
 
 
 class MultiGPUSpec(_Strict):
@@ -299,22 +308,50 @@ class HardwareSpec(_Strict):
             return self.bf16_tflops
         if self.parallelism == "ddp":
             return self.bf16_tflops * self.num_gpus * self.multi.ddp_efficiency
-        return self.bf16_tflops * self.num_gpus * self.multi.fsdp_efficiency
+        if self.parallelism in ("fsdp_zero2", "fsdp_zero3"):
+            return self.bf16_tflops * self.num_gpus * self.multi.fsdp_efficiency
+        # Inference: TP / PP / replicate
+        if self.parallelism == "tp":
+            # tensor parallel: latency wins, total throughput scales sub-linearly
+            return self.bf16_tflops * self.num_gpus * 0.85
+        if self.parallelism == "pp":
+            # pipeline parallel: throughput scales near-linearly with stages
+            return self.bf16_tflops * self.num_gpus * 0.90
+        if self.parallelism == "replicate":
+            # each GPU is independent; aggregate throughput is N×
+            return self.bf16_tflops * self.num_gpus
+        return self.bf16_tflops * self.num_gpus
 
     def per_gpu_factor_weights(self) -> float:
-        if self.parallelism == "fsdp_zero3":
+        # Weights shard under FSDP ZeRO-3 (training) and TP / PP (inference).
+        # ZeRO-2, DDP, replicate, and single keep a full copy on every GPU.
+        if self.parallelism in ("fsdp_zero3", "tp", "pp"):
             return 1.0 / self.num_gpus
         return 1.0
 
     def per_gpu_factor_grads(self) -> float:
-        # gradient buckets shard with weights under ZeRO-2 and ZeRO-3
+        # Gradient buckets shard under ZeRO-2 and ZeRO-3 only (training).
+        # Inference modes have no gradients.
         if self.parallelism in ("fsdp_zero2", "fsdp_zero3"):
             return 1.0 / self.num_gpus
         return 1.0
 
     def per_gpu_factor_optim(self) -> float:
-        # optimizer state shards under ZeRO-2 and ZeRO-3
+        # Optimizer state shards under ZeRO-2 and ZeRO-3 only (training).
         if self.parallelism in ("fsdp_zero2", "fsdp_zero3"):
+            return 1.0 / self.num_gpus
+        return 1.0
+
+    def per_gpu_factor_kv_cache(self) -> float:
+        """Multiplier on inference KV-cache bytes for per-GPU storage.
+
+        - TP shards KV by attention head; PP shards by layer. Both → 1/N
+          (assumes ``num_kv_heads >= num_gpus`` for TP, which is usually true).
+        - replicate / single / DDP / ZeRO-* keep the full KV per GPU. (FSDP
+          shards model state, not the per-step activation tensors that the KV
+          cache lives in.)
+        """
+        if self.parallelism in ("tp", "pp"):
             return 1.0 / self.num_gpus
         return 1.0
 

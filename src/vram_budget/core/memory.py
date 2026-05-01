@@ -296,25 +296,29 @@ def _kv_cache_bytes(
     *,
     train: bool,
     seq_override: Optional[int] = None,
+    kv_precision: str = "bf16",
 ) -> tuple[float, float]:
-    """(swa_bytes, global_bytes) of KV cache for one forward pass.
+    """(swa_bytes, global_bytes) of KV cache for one forward pass, ONE sequence.
+
+    Caller is responsible for multiplying by batch_size for inference. K and V
+    are stored at ``kv_precision`` — bf16 by default, but quantized variants
+    (fp8/int8/q4) are common at inference for long contexts.
 
     - SWA layers cap at the sliding window.
     - KV-shared layers contribute zero (they read upstream K, V).
-    - K and V are each bf16 (2 bytes/element) at training; we honestly use bf16
-      for inference too unless the caller is doing custom quantization.
     """
     seq = seq_override if seq_override is not None else method.seq_len
     nkv = arch.attention.num_key_value_heads
-    bytes_per_kv = 2.0  # bf16 K + bf16 V → 2 bytes each → factor 4 for K+V combined
+    # K and V are stored separately; bytes_per_element is per (K) and per (V).
+    bytes_per_element = precision_bytes(kv_precision)
 
     swa_bytes = 0.0
     global_bytes = 0.0
     for layer in iter_layers(arch, default_precision=method.precision.weights):
         if layer.is_kv_shared:
             continue
-        # Per-layer per-token KV cost: nkv * head_dim * 2 (K and V) * bytes_per_kv
-        per_token = 2 * nkv * layer.head_dim * bytes_per_kv
+        # Per-layer per-token KV cost: 2 (K and V) * nkv * head_dim * bytes_per_element
+        per_token = 2 * nkv * layer.head_dim * bytes_per_element
         if layer.attn_type == "swa":
             swa_bytes += min(seq, arch.attention.sliding_window or seq) * per_token
         elif layer.attn_type == "global":
@@ -322,3 +326,143 @@ def _kv_cache_bytes(
         else:  # full
             global_bytes += seq * per_token
     return swa_bytes, global_bytes
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Inference-quantization sweep
+# ─────────────────────────────────────────────────────────────────────────────
+
+
+# Precisions ordered from highest quality to lowest. Each entry pairs the
+# schema-level precision name with a small overhead (calibration metadata,
+# scale/zero-point per group) that real-world quantizers add on top of the
+# raw bit width. Numbers are conservative — actual overhead varies by format.
+_INFER_PRECISIONS: tuple[tuple[str, str, float], ...] = (
+    # (precision_name, label, calibration_overhead_factor)
+    ("fp32",    "fp32 (PyTorch default)",         1.00),
+    ("bf16",    "bf16 / fp16 (native A100+)",     1.00),
+    ("fp8",     "fp8 (E4M3, native Hopper+)",     1.02),
+    ("int8",    "int8 (AWQ / GPTQ / SmoothQ)",    1.05),
+    ("q4",      "q4 (NF4 / FP4 / GPTQ-INT4)",     1.08),
+    ("q3",      "q3 (GGUF Q3_K)",                 1.10),
+    ("q2",      "q2 (GGUF Q2_K)",                 1.12),
+)
+
+
+@dataclass
+class InferenceOption:
+    """One row of the quantization-fit table."""
+
+    precision: str
+    label: str
+    bytes_per_param: float
+    weights_bytes: float
+    kv_cache_bytes: float
+    activations_bytes: float
+    workspace_bytes: float
+    total_bytes: float
+    fits: bool
+    over_by_gb: float                 # negative = headroom; positive = over budget
+    budget_gb: float
+    effective_budget_gb: float
+
+
+# A sentinel method used only to drive `compute_param_breakdown` for total
+# param counting — none of its training-side fields matter here.
+def _infer_method(seq_len: int, batch_size: int, precision: str) -> TrainingMethodSpec:
+    from vram_budget.core.schema import (  # local import to avoid cycle at module load
+        OptimizerSpec, PrecisionSpec, TrainingMethodSpec as _T,
+    )
+    return _T(
+        kind="full",
+        optimizer=OptimizerSpec(name="adamw_bf16"),
+        precision=PrecisionSpec(weights=precision, master=None, grads="bf16"),
+        seq_len=seq_len,
+        batch_size=batch_size,
+        grad_checkpoint="none",
+        overhead_train_gb=0.0,
+        overhead_infer_gb=0.5,
+    )
+
+
+def inference_options(
+    arch: ModelArchSpec,
+    hardware: HardwareSpec,
+    *,
+    seq_len: int,
+    batch_size: int = 1,
+    kv_precision: str = "bf16",
+    precisions: tuple[tuple[str, str, float], ...] = _INFER_PRECISIONS,
+    workspace_gb: float = 0.5,
+) -> list[InferenceOption]:
+    """Return one row per weight-quantization choice for serving ``arch`` on
+    ``hardware`` at the given sequence length, batch size, and KV precision.
+
+    For each precision: weights = total_params × bytes/param × calibration overhead.
+    KV cache scales with batch_size and shards across GPUs under TP/PP.
+
+    No optimizer state, no gradients, no master copy — pure inference.
+    """
+    method = _infer_method(seq_len, batch_size, "bf16")
+    pb = compute_param_breakdown(arch, method)
+    total_params = pb.total_params
+
+    # KV cache (per-sequence, full model). Caller's batch_size scales it.
+    kv_swa, kv_global = _kv_cache_bytes(
+        arch, method, train=False,
+        seq_override=seq_len,
+        kv_precision=kv_precision,
+    )
+    kv_bytes_total = (kv_swa + kv_global) * batch_size
+
+    # KV cache shards under TP (by attention head) and PP (by layer);
+    # stays per-GPU under replicate / single / DDP / ZeRO-*.
+    kv_factor = hardware.per_gpu_factor_kv_cache()
+    kv_bytes_per_gpu = kv_bytes_total * kv_factor
+
+    # Activations: one layer's output at peak (no checkpointing during inference).
+    # Activations are batch-dependent and live on each GPU.
+    act_bytes = batch_size * seq_len * arch.hidden_size * 2.0   # bf16
+
+    workspace_bytes = workspace_gb * (1024 ** 3)
+
+    # Multi-GPU: weights shard under TP / PP. KV/activations stay per-GPU
+    # except for sharding under TP/PP via per_gpu_factor_kv_cache above.
+    weights_factor = hardware.per_gpu_factor_weights()
+    budget_gb = hardware.vram_gb
+    effective_budget_gb = max(0.0, budget_gb - hardware.safety_buffer_gb)
+
+    out: list[InferenceOption] = []
+    for prec, label, overhead in precisions:
+        bpp_raw = precision_bytes(prec)
+        bpp = bpp_raw * overhead
+        weights_total_bytes = total_params * bpp
+        weights_per_gpu = weights_total_bytes * weights_factor
+        total = weights_per_gpu + kv_bytes_per_gpu + act_bytes + workspace_bytes
+        eff_budget_bytes = effective_budget_gb * (1024 ** 3)
+        out.append(InferenceOption(
+            precision=prec,
+            label=label,
+            bytes_per_param=bpp,
+            weights_bytes=weights_per_gpu,
+            kv_cache_bytes=kv_bytes_per_gpu,
+            activations_bytes=act_bytes,
+            workspace_bytes=workspace_bytes,
+            total_bytes=total,
+            fits=total <= eff_budget_bytes,
+            over_by_gb=(total - eff_budget_bytes) / 1024**3,
+            budget_gb=budget_gb,
+            effective_budget_gb=effective_budget_gb,
+        ))
+    return out
+
+
+def recommended_inference_option(options: list[InferenceOption]) -> Optional[InferenceOption]:
+    """Pick the highest-precision (best-quality) option that fits.
+
+    Returns ``None`` if nothing fits at any precision in the list.
+    """
+    for opt in options:
+        if opt.fits:
+            return opt
+    return None

@@ -175,8 +175,37 @@ def test_time_mode_accepts_text_input(vram_budget_cmd):
 
 
 def test_quit_from_welcome(vram_budget_cmd):
-    keys = [DOWN * 3 + ENTER]
+    # Welcome menu now has 5 options: fit / frontier / time / inference / quit
+    # 4 DOWN arrows = "quit" highlighted.
+    keys = [DOWN * 4 + ENTER]
     text = _spawn_and_drive(vram_budget_cmd, keys, max_s=5)
+    assert _count_incomplete_csi(text) == 0
+
+
+def test_inference_mode_renders_quantization_table(vram_budget_cmd):
+    """The new 'inference' mode should run system + arch + seq_len + batch
+    and emit a per-precision table with a recommendation."""
+    keys = [
+        DOWN * 3 + ENTER,                # mode = inference (4th option)
+        b"4090", ENTER,                  # gpu via filter
+        ENTER,                           # 1 GPU
+        ENTER,                           # default RAM
+        ENTER,                           # default PCIe Gen 4
+        b"llama3 8b", ENTER,             # arch
+        ENTER,                           # seq_len default 4096
+        ENTER,                           # batch default 1
+        DOWN + ENTER,                    # quit
+    ]
+    text = _spawn_and_drive(vram_budget_cmd, keys, max_s=20)
+    clean = _strip_ansi(text)
+    assert "Inference quantization" in clean, (
+        f"inference section missing:\n{clean[-1500:]}"
+    )
+    assert "Per-precision fit" in clean
+    assert "Recommendation" in clean or "No quantization fits" in clean
+    # The 7-row precision sweep should all appear
+    for tag in ("fp32", "bf16", "fp8", "int8", "q4", "q3", "q2"):
+        assert tag in clean, f"precision {tag!r} not in output"
     assert _count_incomplete_csi(text) == 0
 
 
@@ -225,7 +254,9 @@ def test_no_cascading_indentation_after_repeated_navigation(vram_budget_cmd):
     # and only count real spaces.
     visible_indents = []
     for ln in clean.split("\n"):
-        if "fit  — will it fit?" not in ln:
+        # Match on a stable token from the wizard's mode list (not on the
+        # human-readable description, which evolves).
+        if "fit  —" not in ln and "frontier  —" not in ln:
             continue
         # remove all carriage-return chars; what's left is the rendered line
         flat = ln.replace("\r", "")

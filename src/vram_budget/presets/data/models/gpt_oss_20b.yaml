@@ -1,0 +1,27 @@
+name: openai/gpt-oss-20b  (MoE)
+family: transformer-decoder
+
+# OpenAI's gpt-oss-20b: 21B total, ~3.6B active. 32 experts, top-4 active.
+# Released with native MXFP4 weights; here we treat it as a generic MoE so
+# the calculator's quantization sweep applies normally.
+vocab: { size: 200000, tied_embeddings: false, ple: { enabled: false } }
+hidden_size: 2880
+num_hidden_layers: 24
+
+ffn:
+  kind: gated_silu
+  intermediate_size: 8192        # ignored under MoE
+  moe:
+    enabled: true
+    num_experts: 32
+    num_active_experts: 4
+    expert_intermediate_size: 2880
+    num_shared_experts: 0
+    router_bytes_per_param: 2.0
+
+attention:
+  pattern: full
+  num_attention_heads: 64
+  num_key_value_heads: 8
+  head_dim: 64
+  rope: { base_swa: 150000.0 }

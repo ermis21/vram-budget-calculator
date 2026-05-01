@@ -22,6 +22,11 @@ import yaml
 
 from vram_budget.core.arch import resolve_intermediate_size
 from vram_budget.core.compute import compute
+from vram_budget.core.memory import (
+    InferenceOption,
+    inference_options,
+    recommended_inference_option,
+)
 from vram_budget.core.params import compute_param_breakdown
 from vram_budget.frontier import frontier_search
 from vram_budget.presets import (
@@ -114,6 +119,14 @@ _PCIE_CHOICES = [
     Choice("5", description="~64 GB/s ×16 (current high-end)", value=5),
 ]
 
+
+_KV_PRECISION_CHOICES = [
+    Choice("bf16", description="full quality · 2 B/element · default", value="bf16"),
+    Choice("fp8",  description="½ size · native on Hopper+ · ~no quality loss", value="fp8"),
+    Choice("int8", description="½ size · AWQ-KV / SmoothQuant-KV · small loss", value="int8"),
+    Choice("q4",   description="¼ size · llama.cpp Q4_KV · big long-context win, noticeable loss", value="q4"),
+]
+
 # PCIe gen affects DDP/FSDP communication efficiency. These multipliers
 # scale the *base* efficiency declared on the GPU YAML or the schema default.
 _PCIE_EFFICIENCY = {3: 0.85, 4: 1.0, 5: 1.05}
@@ -150,8 +163,29 @@ def _build_hardware(
     )
 
 
-def _ask_system(default_gpu: str | None = None) -> "HardwareSpec | None":
+_TRAINING_PARALLELISM_CHOICES = [
+    Choice("ddp", description="replicate model + optim, all-reduce grads", value="ddp"),
+    Choice("fsdp_zero2", description="shard optimizer state across GPUs", value="fsdp_zero2"),
+    Choice("fsdp_zero3", description="shard weights + grads + optim across GPUs", value="fsdp_zero3"),
+]
+
+_INFERENCE_PARALLELISM_CHOICES = [
+    Choice("tp", description="tensor parallel — shard each layer's weights across GPUs", value="tp"),
+    Choice("pp", description="pipeline parallel — split layers across GPUs sequentially", value="pp"),
+    Choice("replicate", description="each GPU holds a full copy, serves independent requests", value="replicate"),
+]
+
+
+def _ask_system(
+    default_gpu: str | None = None,
+    *,
+    mode: str = "fit",
+) -> "HardwareSpec | None":
     """Walk the user through GPU model → count → parallelism → RAM → PCIe gen.
+
+    The parallelism options shown depend on ``mode``:
+    training modes (fit/frontier/time) get DDP/ZeRO-2/ZeRO-3; inference mode
+    gets tensor / pipeline / replicate.
 
     Returns the constructed ``HardwareSpec``, or ``None`` if the user backed out.
     """
@@ -172,30 +206,33 @@ def _ask_system(default_gpu: str | None = None) -> "HardwareSpec | None":
         num_gpus = 1
 
     if num_gpus > 1:
-        parallelism = select_one(
-            "Parallelism strategy?",
-            [
-                Choice("ddp", description="replicate model + optim, all-reduce grads", value="ddp"),
-                Choice("fsdp_zero2", description="shard optimizer state across GPUs", value="fsdp_zero2"),
-                Choice("fsdp_zero3", description="shard weights + grads + optim across GPUs", value="fsdp_zero3"),
-            ],
+        choices = (
+            _INFERENCE_PARALLELISM_CHOICES
+            if mode == "inference"
+            else _TRAINING_PARALLELISM_CHOICES
         )
+        parallelism = select_one("Parallelism strategy?", choices)
         if parallelism is None:
             return None
     else:
         parallelism = "single"
 
-    ram_str = text_input(
-        "System RAM (GB)?",
-        default="64",
-        placeholder="used for offloading checks; not in v1 calc",
-    )
-    if ram_str is None:
-        return None
-    try:
-        system_ram_gb = max(1.0, float(ram_str))
-    except ValueError:
+    # System RAM is used only by training-side offloading checks (not in v1 calc),
+    # so the inference path doesn't need to ask. Use the schema default.
+    if mode == "inference":
         system_ram_gb = 64.0
+    else:
+        ram_str = text_input(
+            "System RAM (GB)?",
+            default="64",
+            placeholder="used for offloading checks; not in v1 calc",
+        )
+        if ram_str is None:
+            return None
+        try:
+            system_ram_gb = max(1.0, float(ram_str))
+        except ValueError:
+            system_ram_gb = 64.0
 
     pcie_gen = select_one(
         "PCIe generation?",
@@ -232,7 +269,10 @@ def _model_choices(*, prefer_styles: bool = False) -> list[Choice]:
                 tags.append(f"MoE-{m.ffn.moe.num_experts}x{m.ffn.moe.num_active_experts}")
             if m.vocab.ple.enabled:
                 tags.append("PLE")
-            desc = (", ".join(tags) or "dense") + f" · L={m.num_hidden_layers}"
+            # Include the friendly model name in the description so the search
+            # can match on it ("qwen 3.6" → finds Qwen/Qwen3.6-27B).
+            tag_str = (", ".join(tags) or "dense")
+            desc = f"{tag_str} · L={m.num_hidden_layers} · {m.name}"
         except Exception:
             desc = ""
         out.append(Choice(label=n, description=desc))
@@ -480,6 +520,392 @@ def _render_frontier(result) -> None:
         print(f"    {YELLOW}·{RESET} add a 2nd GPU and pick fsdp_zero3 (shards weights+grads+optim)")
 
 
+def _render_inference(
+    arch,
+    hw,
+    options: list,
+    *,
+    seq_len: int,
+    batch_size: int = 1,
+    kv_precision: str = "bf16",
+) -> None:
+    """Render the quantization-fit table for serving ``arch`` on ``hw``.
+
+    One row per weight precision, with the highest-quality fitting option
+    flagged as the recommendation.
+    """
+    section(f"Inference quantization · {arch.name}")
+
+    # The fit check is ALWAYS per-GPU. "Combined" framing is misleading because
+    # only the *sharded* tensors (weights under TP/PP, KV cache under TP/PP)
+    # actually pool across GPUs — activations and the per-GPU slice still have
+    # to fit each GPU's own VRAM.
+    n = hw.num_gpus
+    eff_per_gpu = max(0.0, hw.vram_gb - hw.safety_buffer_gb)
+    if n > 1:
+        if hw.parallelism == "tp":
+            split_label = "tensor-parallel"
+            shard_note = (
+                "weights and KV cache shard across GPUs; "
+                "each GPU still has its own per-GPU budget"
+            )
+        elif hw.parallelism == "pp":
+            split_label = "pipeline-parallel"
+            shard_note = (
+                "each GPU holds L/N layers (its own weights + its own KV); "
+                "all activation and overhead bytes are per-GPU"
+            )
+        elif hw.parallelism == "fsdp_zero3":
+            split_label = "ZeRO-3-sharded"
+            shard_note = "weights/grads/optim shard across GPUs (training)"
+        elif hw.parallelism == "replicate":
+            split_label = "replicate"
+            shard_note = "every GPU stores the full model independently"
+        else:
+            split_label = hw.parallelism
+            shard_note = ""
+
+        sys_line_a = (
+            f"{n}× {hw.name}  ·  {split_label}  ·  "
+            f"{TEAL}{eff_per_gpu:.1f} GB usable per GPU{RESET}  "
+            f"{DIM}(this is what each GPU has to fit){RESET}"
+        )
+        sys_line_b = shard_note
+    else:
+        sys_line_a = (
+            f"1× {hw.name}  ·  "
+            f"{TEAL}{eff_per_gpu:.1f} GB usable{RESET}"
+        )
+        sys_line_b = ""
+
+    info("System", sys_line_a)
+    if sys_line_b:
+        info("",  f"{DIM}{sys_line_b}{RESET}")
+    info(
+        "Workload",
+        f"seq_len={seq_len:,}  ·  batch={batch_size}  ·  KV={kv_precision}",
+    )
+
+    pb = compute_param_breakdown(arch, _infer_method_for_render(seq_len, batch_size))
+    info("Total params", f"{TEAL}{fmt_count(pb.total_params)}{RESET}")
+    if pb.active_params != pb.total_params:
+        info(
+            "Active params",
+            f"{fmt_count(pb.active_params)} {DIM}(used per token; weights still need full storage){RESET}",
+        )
+
+    rec = recommended_inference_option(options)
+
+    # Live GGUF is the primary output; the synthetic precision sweep is a
+    # fallback for models that don't have a community GGUF on HF Hub.
+    print()
+    if _render_live_gguf(arch, hw, options, seq_len=seq_len):
+        return
+
+    section("Per-precision fit  (memory shown is per-GPU; weights split if TP/PP)")
+    weights_sharded = hw.per_gpu_factor_weights() < 1.0
+    kv_sharded = hw.per_gpu_factor_kv_cache() < 1.0
+    kv_col_label = f"KV ({kv_precision})"
+    if kv_sharded:
+        kv_col_label += "/GPU"
+    # Per-GPU need is the operand of the fit check — make that prominent.
+    need_col = "needs/GPU" if hw.num_gpus > 1 else "needs"
+    if weights_sharded:
+        cols = [
+            ("precision",       28),
+            ("B/p",               7),
+            ("weights total",    14),
+            ("weights/GPU",      12),
+            (kv_col_label,       14),
+            (need_col,           10),
+            ("verdict",          26),
+        ]
+    else:
+        cols = [
+            ("precision",   28),
+            ("B/p",          7),
+            ("weights",     10),
+            (kv_col_label,  14),
+            (need_col,      10),
+            ("verdict",     26),
+        ]
+    head = "  " + "  ".join(f"{DIM_YELLOW}{n:<{w}}{RESET}" for n, w in cols)
+    print(head)
+    print(f"  {DIM}{'─' * (sum(w for _, w in cols) + 2 * (len(cols) - 1))}{RESET}")
+
+    for opt in options:
+        is_rec = rec is not None and opt.precision == rec.precision
+        budget = opt.effective_budget_gb
+        need_gb = gb(opt.total_bytes)
+        if opt.fits:
+            verdict = f"{GREEN}✓ fits{RESET}  {DIM}({need_gb:.1f}/{budget:.1f}){RESET}"
+            if is_rec:
+                verdict += f"  {YELLOW}← rec{RESET}"
+        else:
+            verdict = (
+                f"{RED}✗ {need_gb:.1f} > {budget:.1f}{RESET}  "
+                f"{DIM}(+{opt.over_by_gb:.1f}){RESET}"
+            )
+
+        prec_label = f"{TEAL}{BOLD}{opt.label}{RESET}" if is_rec else opt.label
+        weights_total_bytes = opt.weights_bytes * hw.num_gpus  # un-shard for display
+        if weights_sharded:
+            cells = [
+                (prec_label, cols[0][1]),
+                (f"{opt.bytes_per_param:.3f}", cols[1][1]),
+                (f"{gb(weights_total_bytes):.2f} GB", cols[2][1]),
+                (f"{gb(opt.weights_bytes):.2f} GB", cols[3][1]),
+                (f"{gb(opt.kv_cache_bytes):.2f} GB", cols[4][1]),
+                (f"{BOLD}{gb(opt.total_bytes):.2f} GB{RESET}", cols[5][1]),
+                (verdict, cols[6][1]),
+            ]
+        else:
+            cells = [
+                (prec_label, cols[0][1]),
+                (f"{opt.bytes_per_param:.3f}", cols[1][1]),
+                (f"{gb(opt.weights_bytes):.2f} GB", cols[2][1]),
+                (f"{gb(opt.kv_cache_bytes):.2f} GB", cols[3][1]),
+                (f"{BOLD}{gb(opt.total_bytes):.2f} GB{RESET}", cols[4][1]),
+                (verdict, cols[5][1]),
+            ]
+        line = "  "
+        for text, w in cells:
+            visible = _strip_ansi(text)
+            pad = max(0, w - len(visible))
+            line += text + " " * pad + "  "
+        print(line.rstrip())
+
+    print()
+    if rec is None:
+        section("No quantization fits")
+        smallest = options[-1]
+        budget = smallest.effective_budget_gb
+        need = gb(smallest.total_bytes)
+        # Identify the dominant cost — that's the lever the user should pull.
+        weights_share = smallest.weights_bytes / smallest.total_bytes
+        kv_share = smallest.kv_cache_bytes / smallest.total_bytes
+        act_share = smallest.activations_bytes / smallest.total_bytes
+
+        print(
+            f"  Even at {smallest.label}, each GPU still needs "
+            f"{TEAL}{need:.2f} GB{RESET} but only {TEAL}{budget:.2f} GB{RESET} is usable "
+            f"({RED}+{smallest.over_by_gb:.2f} GB over{RESET})."
+        )
+        # Reminder of where memory pools and where it doesn't.
+        if hw.num_gpus > 1 and hw.parallelism in ("tp", "pp"):
+            print(
+                f"  {DIM}Memory does NOT pool across GPUs: combined VRAM only helps for "
+                f"sharded tensors. Per-GPU activations and per-GPU slice still apply.{RESET}"
+            )
+
+        # Context-aware suggestions, ordered by what would help most.
+        suggestions: list[str] = []
+        if kv_share > 0.4:
+            # KV is the dominant cost
+            if kv_precision == "bf16":
+                suggestions.append("KV cache is the dominant cost — try fp8 or q4 KV (huge savings)")
+            elif kv_precision == "fp8":
+                suggestions.append("drop KV from fp8 → q4 (halves KV memory, modest quality loss)")
+            elif kv_precision == "int8":
+                suggestions.append("drop KV from int8 → q4")
+            suggestions.append(f"reduce context length (KV scales linearly with seq_len={seq_len:,})")
+            suggestions.append("reduce batch size (KV scales linearly with batch)")
+        if weights_share > 0.5:
+            suggestions.append("pick a smaller model (weights are dominant)")
+            if hw.parallelism not in ("tp", "pp"):
+                suggestions.append("add a 2nd GPU with tensor parallelism (halves per-GPU weights)")
+        if act_share > 0.2:
+            suggestions.append("reduce batch size (activations scale linearly with batch)")
+        # Catch-all
+        if not suggestions:
+            suggestions.append("add another GPU with tensor or pipeline parallelism")
+            suggestions.append("pick a smaller model")
+            suggestions.append("reduce context length or batch")
+
+        for s in suggestions:
+            print(f"  {YELLOW}·{RESET} {s}")
+    else:
+        section("Recommendation")
+        print(f"  Use {TEAL}{BOLD}{rec.label}{RESET}.")
+        print(f"  {DIM}Highest-quality precision that fits on this system.{RESET}")
+        if rec.kv_cache_bytes > 1.0 * 1024**3:
+            print(
+                f"  {DIM}KV cache at seq_len={seq_len:,} is {gb(rec.kv_cache_bytes):.1f} GB — "
+                f"longer contexts will push toward lower precisions.{RESET}"
+            )
+        # Suggest a downgrade if quality risk is real (q3/q2 only)
+        if rec.precision in ("q3", "q2"):
+            print(
+                f"  {DIM}Note: q3/q2 are aggressive quantizations — perplexity loss can be "
+                f"noticeable. Consider a smaller model at q4 or higher if quality matters.{RESET}"
+            )
+
+
+def _infer_method_for_render(seq_len: int, batch_size: int):
+    """Build a dummy method for compute_param_breakdown when rendering inference."""
+    from vram_budget.core.schema import (
+        OptimizerSpec, PrecisionSpec, TrainingMethodSpec,
+    )
+    return TrainingMethodSpec(
+        kind="full",
+        optimizer=OptimizerSpec(name="adamw_bf16"),
+        precision=PrecisionSpec(weights="bf16", master=None, grads="bf16"),
+        seq_len=seq_len,
+        batch_size=batch_size,
+    )
+
+
+def _render_live_gguf(arch, hw, options: list, *, seq_len: int) -> bool:
+    """Query Hugging Face for actual GGUF quants of ``arch`` and show their fit.
+
+    Per-GPU non-weight bytes (KV cache, activations, workspace) are precision-
+    independent in our model, so we reuse them from any row of ``options``.
+
+    Returns ``True`` if the live GGUF section was rendered as the primary
+    output (caller should suppress the synthetic precision sweep). Returns
+    ``False`` when no GGUF repo was found or the lookup errored — the caller
+    should fall back to the synthetic table.
+    """
+    from vram_budget.integrations.huggingface_gguf import discover_gguf_variants
+
+    try:
+        variants = discover_gguf_variants(arch.name)
+    except Exception:
+        return False
+
+    if not variants:
+        return False
+
+    section(f"Live GGUF variants on Hugging Face · {arch.name}")
+
+    # Non-weight bytes are the same for every row of ``options`` — pick one.
+    ref = options[0]
+    other_bytes = ref.kv_cache_bytes + ref.activations_bytes + ref.workspace_bytes
+    weights_factor = hw.per_gpu_factor_weights()
+    eff_budget_bytes = ref.effective_budget_gb * (1024 ** 3)
+
+    # All variants on the Hub came from the same repo (we pick one in
+    # ``discover_gguf_variants``), so show that repo as a header.
+    repo_id = variants[0].repo_id
+    print(f"  {DIM}source:{RESET} {TEAL}{repo_id}{RESET}")
+
+    weights_sharded = weights_factor < 1.0
+    need_col = "needs/GPU" if hw.num_gpus > 1 else "needs"
+    if weights_sharded:
+        cols = [
+            ("quant",          12),
+            ("file size",      11),
+            ("weights/GPU",    12),
+            ("filename",       40),
+            (need_col,         10),
+            ("verdict",        20),
+        ]
+    else:
+        cols = [
+            ("quant",        12),
+            ("file size",    11),
+            ("filename",     40),
+            (need_col,       10),
+            ("verdict",      20),
+        ]
+    head = "  " + "  ".join(f"{DIM_YELLOW}{n:<{w}}{RESET}" for n, w in cols)
+    print(head)
+    print(f"  {DIM}{'─' * (sum(w for _, w in cols) + 2 * (len(cols) - 1))}{RESET}")
+
+    # Pre-compute rows so we can flag the highest-quality fit.
+    rows: list[tuple[object, float, float, bool]] = []
+    for v in variants:
+        weights_per_gpu = v.size_bytes * weights_factor
+        total = weights_per_gpu + other_bytes
+        rows.append((v, weights_per_gpu, total, total <= eff_budget_bytes))
+
+    # Show only the top-5 highest-quality fits. ``variants`` is sorted by file
+    # size descending in ``_variants_from_files`` — biggest fitting file first.
+    fit_rows = [r for r in rows if r[3]][:5]
+    if not fit_rows:
+        print(
+            f"  {DIM}none of the {len(rows)} GGUF variants in {repo_id} fit on this system.{RESET}"
+        )
+        # Show the smallest variant so the user knows how close they are.
+        smallest = min(rows, key=lambda r: r[2])
+        v, _, total, _ = smallest
+        over = gb(total) - ref.effective_budget_gb
+        print(
+            f"  {DIM}smallest is {RESET}{v.quant}{DIM} at "
+            f"{gb(total):.1f} GB needed (over by {RED}{over:.1f} GB{DIM}).{RESET}"
+        )
+        return True
+
+    # The recommendation is the largest fit (== first row, since sorted desc).
+    rec_v, _, _, _ = fit_rows[0]
+
+    for v, weights_per_gpu, total, _ in fit_rows:
+        is_rec = v.quant == rec_v.quant
+        need_gb = gb(total)
+        budget_gb = ref.effective_budget_gb
+        verdict = f"{GREEN}✓ fits{RESET}  {DIM}({need_gb:.1f}/{budget_gb:.1f}){RESET}"
+        if is_rec:
+            verdict += f"  {YELLOW}← rec{RESET}"
+
+        quant_label = f"{TEAL}{BOLD}{v.quant}{RESET}" if is_rec else v.quant
+        # Truncate long filenames; the repo prefix is shown in the source line.
+        fname = v.filename
+        if len(fname) > 38:
+            fname = fname[:35] + "..."
+
+        if weights_sharded:
+            cells = [
+                (quant_label, cols[0][1]),
+                (f"{v.size_gb:.2f} GB", cols[1][1]),
+                (f"{gb(weights_per_gpu):.2f} GB", cols[2][1]),
+                (fname, cols[3][1]),
+                (f"{BOLD}{need_gb:.2f} GB{RESET}", cols[4][1]),
+                (verdict, cols[5][1]),
+            ]
+        else:
+            cells = [
+                (quant_label, cols[0][1]),
+                (f"{v.size_gb:.2f} GB", cols[1][1]),
+                (fname, cols[2][1]),
+                (f"{BOLD}{need_gb:.2f} GB{RESET}", cols[3][1]),
+                (verdict, cols[4][1]),
+            ]
+        line = "  "
+        for text, w in cells:
+            visible = _strip_ansi(text)
+            pad = max(0, w - len(visible))
+            line += text + " " * pad + "  "
+        print(line.rstrip())
+
+    total_fits = sum(1 for r in rows if r[3])
+    if total_fits > len(fit_rows):
+        print(
+            f"  {DIM}… {total_fits - len(fit_rows)} more fit (showing top 5 by quality).{RESET}"
+        )
+
+    # Single recommendation block — replaces the synthetic one entirely.
+    print()
+    section("Recommendation")
+    print(f"  Download {TEAL}{BOLD}{rec_v.filename}{RESET}")
+    print(
+        f"  {DIM}from {RESET}{TEAL}https://huggingface.co/{rec_v.repo_id}{RESET}  "
+        f"{DIM}({rec_v.size_gb:.1f} GB on disk){RESET}"
+    )
+    print(f"  {DIM}Highest-quality real GGUF that fits on this system.{RESET}")
+    # Long-context KV warning (carried over from the suppressed synthetic rec).
+    if ref.kv_cache_bytes > 1.0 * 1024 ** 3:
+        print(
+            f"  {DIM}KV cache at seq_len={seq_len:,} is {gb(ref.kv_cache_bytes):.1f} GB — "
+            f"longer contexts will push toward lower precisions.{RESET}"
+        )
+    if rec_v.quant.startswith(("Q2", "IQ2", "IQ1")):
+        print(
+            f"  {DIM}Note: {rec_v.quant} is an aggressive quantization — perplexity loss "
+            f"can be noticeable. Consider a smaller model at Q4 or higher if quality matters.{RESET}"
+        )
+    return True
+
+
 def _render_time(arch_name, gpu_name, method_name, result, pb) -> None:
     hw = result.hardware
     sys_line = f"{hw.num_gpus}× {hw.name}"
@@ -654,9 +1080,10 @@ def run_wizard() -> int:
             mode = select_one(
                 "Which mode?",
                 [
-                    Choice("fit", description="will it fit?", value="fit"),
-                    Choice("frontier", description="biggest model that fits", value="frontier"),
-                    Choice("time", description="wall-clock at N tokens", value="time"),
+                    Choice("fit", description="training fit · will it train?", value="fit"),
+                    Choice("frontier", description="biggest model that trains on a GPU", value="frontier"),
+                    Choice("time", description="training wall-clock at N tokens", value="time"),
+                    Choice("inference", description="best quantization for serving", value="inference"),
                     Choice("quit", description="exit", value="quit"),
                 ],
             )
@@ -664,7 +1091,7 @@ def run_wizard() -> int:
                 print()
                 return 0
 
-            hw = _ask_system()
+            hw = _ask_system(mode=mode)
             if hw is None:
                 continue
             gpu = hw.name   # used by renderers as a friendly label
@@ -677,24 +1104,38 @@ def run_wizard() -> int:
             if arch is None:
                 continue
 
-            method = select_typed(
-                "Search training methods (type to filter, e.g. 'qlora', 'full', 'lora'):",
-                _method_choices(),
-                page_size=8,
-            )
-            if method is None:
-                continue
+            # For inference mode, the method (full FT / LoRA / etc.) is irrelevant —
+            # we just want to know which weight quantization fits for serving.
+            if mode == "inference":
+                method = None
+                method_obj = None
+                seq_str = text_input(
+                    "Inference context length?",
+                    default="4096",
+                    placeholder="plain int, or shorthand like 8k / 32k / 128k",
+                )
+                if seq_str is None:
+                    continue
+                seq_len = _parse_seq_len(seq_str, default=4096)
+            else:
+                method = select_typed(
+                    "Search training methods (type to filter, e.g. 'qlora', 'full', 'lora'):",
+                    _method_choices(),
+                    page_size=8,
+                )
+                if method is None:
+                    continue
 
-            seq_str = text_input(
-                "Sequence length?",
-                default="4096",
-                placeholder="plain int, or shorthand like 32k / 128k / 1M",
-            )
-            if seq_str is None:
-                continue
-            seq_len = _parse_seq_len(seq_str, default=4096)
+                seq_str = text_input(
+                    "Sequence length?",
+                    default="4096",
+                    placeholder="plain int, or shorthand like 32k / 128k / 1M",
+                )
+                if seq_str is None:
+                    continue
+                seq_len = _parse_seq_len(seq_str, default=4096)
 
-            method_obj = get_method(method).model_copy(update={"seq_len": seq_len})
+                method_obj = get_method(method).model_copy(update={"seq_len": seq_len})
 
             if mode == "fit":
                 arch_obj = get_model(arch)
@@ -747,18 +1188,38 @@ def run_wizard() -> int:
                             extra_token_counts=extras)
                 _render_time(arch, gpu, method, r, pb)
 
+            elif mode == "inference":
+                batch_str = text_input("Batch size?", default="1")
+                if batch_str is None:
+                    continue
+                try:
+                    batch_size = max(1, int(batch_str))
+                except ValueError:
+                    batch_size = 1
+                kv_precision = select_one(
+                    "KV cache precision?",
+                    _KV_PRECISION_CHOICES,
+                    default=0,    # bf16 highlighted by default
+                )
+                if kv_precision is None:
+                    continue
+                arch_obj = get_model(arch)
+                opts = inference_options(
+                    arch_obj, hw,
+                    seq_len=seq_len,
+                    batch_size=batch_size,
+                    kv_precision=kv_precision,
+                )
+                _render_inference(
+                    arch_obj, hw, opts,
+                    seq_len=seq_len, batch_size=batch_size,
+                    kv_precision=kv_precision,
+                )
+
             print()
             divider()
-            again = select_one(
-                "What now?",
-                [
-                    Choice("again", description="run again", value="again"),
-                    Choice("quit", description="exit", value="quit"),
-                ],
-            )
-            if again != "again":
-                print()
-                return 0
+            print()
+            return 0
 
         except KeyboardInterrupt:
             print(f"\n  {DIM}interrupted{RESET}\n")

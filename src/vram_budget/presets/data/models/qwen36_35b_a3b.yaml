@@ -1,0 +1,41 @@
+name: "Qwen/Qwen3.6-35B-A3B  (MoE, hybrid gated-attention + DeltaNet)"
+family: transformer-decoder
+
+# Released April 2026. Hybrid linear/full attention (3:1 pattern, like
+# Qwen3.6-27B) PLUS fine-grained MoE with 256 routed experts + 1 shared.
+# - 40 layers total: 10 full_attention + 30 linear_attention.
+# - Each MoE FFN: 256 experts × intermediate=512 + 1 shared expert × 512.
+# - Active per token: top-8 + shared = 9 experts per layer → ~3B active.
+# - "A3B" = active 3B params; "35B" = total.
+# Multimodal vision tower NOT modeled here.
+vocab:
+  size: 248320
+  tied_embeddings: false
+  ple: { enabled: false }
+
+hidden_size: 2048
+num_hidden_layers: 40
+
+ffn:
+  kind: gated_silu
+  intermediate_size: 512          # ignored under MoE
+  moe:
+    enabled: true
+    num_experts: 256
+    num_active_experts: 8
+    expert_intermediate_size: 512
+    num_shared_experts: 1
+    router_bytes_per_param: 2.0
+
+attention:
+  pattern: hybrid
+  num_attention_heads: 16
+  num_key_value_heads: 2
+  head_dim: 256
+  global_head_dim: null
+  sliding_window: 64               # approximation for the 30 linear-attention layers
+  swa_global_ratio: 3              # period 4 → 1/4 layers full attention (10 of 40)
+  num_kv_shared_layers: 0
+  rope:
+    base_swa: 10000000.0
+    base_global: 10000000.0

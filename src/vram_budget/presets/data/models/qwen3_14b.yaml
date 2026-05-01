@@ -1,0 +1,22 @@
+name: Qwen/Qwen3-14B
+family: transformer-decoder
+
+vocab:
+  size: 151936
+  tied_embeddings: false
+  ple: { enabled: false }
+
+hidden_size: 5120
+num_hidden_layers: 40
+
+ffn:
+  kind: gated_silu
+  intermediate_size: 17408
+  moe: { enabled: false }
+
+attention:
+  pattern: full
+  num_attention_heads: 40
+  num_key_value_heads: 8
+  head_dim: 128
+  rope: { base_swa: 1000000.0 }
