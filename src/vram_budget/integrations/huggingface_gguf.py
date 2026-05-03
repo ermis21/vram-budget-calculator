@@ -89,10 +89,27 @@ class GGUFVariant:
     filename: str       # e.g. "Qwen3-8B-Q4_K_M.gguf"
     quant: str          # e.g. "Q4_K_M" (uppercase)
     size_bytes: int     # actual on-disk size of the .gguf file
+    # F5: optional perplexity-delta data scraped from the repo's README.
+    # ``ppl_delta_f16`` is the perplexity gain vs the F16/BF16 baseline
+    # (positive = worse). ``kld`` is KL-divergence vs the same baseline,
+    # used by some repos when full perplexity isn't published. Either or
+    # both may be ``None`` for a given variant.
+    ppl_delta_f16: Optional[float] = None
+    kld: Optional[float] = None
 
     @property
     def size_gb(self) -> float:
         return self.size_bytes / 1024 ** 3
+
+
+@dataclass
+class PerplexityEntry:
+    """Parsed perplexity row for one quant from a repo README."""
+
+    quant: str
+    ppl: Optional[float]            # absolute perplexity if reported
+    ppl_delta_f16: Optional[float]  # delta vs F16/BF16 baseline if reported
+    kld: Optional[float]            # KL-divergence vs baseline if reported
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -119,6 +136,18 @@ def parse_quant_from_filename(filename: str) -> Optional[str]:
 # ─────────────────────────────────────────────────────────────────────────────
 # HTTP helpers (fail-soft)
 # ─────────────────────────────────────────────────────────────────────────────
+
+
+def _http_get_text(url: str, *, timeout: float) -> Optional[str]:
+    """Fetch a plaintext URL. Returns ``None`` on any error (fail-soft)."""
+    req = urllib.request.Request(
+        url, headers={"User-Agent": "vram-budget/0.1 (+https://github.com)"}
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            return resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        return None
 
 
 def _http_get_json(url: str, *, timeout: float):
@@ -342,6 +371,121 @@ def _is_support_file(path: str) -> bool:
     )
 
 
+def _parse_md_perplexity_tables(md: str) -> dict[str, PerplexityEntry]:
+    """Extract ``{QUANT_TAG: PerplexityEntry}`` from any pipe-style markdown
+    table in the README that has perplexity / PPL / KL-divergence columns.
+
+    Tolerates: column reordering, mixed PPL+delta cells (``"5.7234 (+0.05)"``),
+    KLD-only tables, multiple tables in one README. Fails-soft to ``{}``.
+    """
+    out: dict[str, PerplexityEntry] = {}
+    if not md:
+        return out
+
+    # Header column-name patterns (matched case-insensitively).
+    quant_col = re.compile(r"\b(quant|filename|file|name|type)\b", re.I)
+    ppl_col = re.compile(r"\b(perplexity|ppl)\b", re.I)
+    kld_col = re.compile(r"\bkl[\s\-_]?(div|divergence)?\b", re.I)
+    delta_col = re.compile(r"(delta|diff|Δ|gain)", re.I)
+
+    # Iterate candidate pipe-tables. A table block starts with a line beginning
+    # with ``|`` and continues while subsequent lines also start with ``|``.
+    lines = md.splitlines()
+    i = 0
+    while i < len(lines):
+        if not lines[i].lstrip().startswith("|"):
+            i += 1
+            continue
+        block: list[str] = []
+        while i < len(lines) and lines[i].lstrip().startswith("|"):
+            block.append(lines[i])
+            i += 1
+        if len(block) < 3:
+            continue   # need header + separator + ≥1 data row
+
+        def cells(line: str) -> list[str]:
+            stripped = line.strip()
+            if stripped.startswith("|"):
+                stripped = stripped[1:]
+            if stripped.endswith("|"):
+                stripped = stripped[:-1]
+            return [c.strip() for c in stripped.split("|")]
+
+        header = [c.lower() for c in cells(block[0])]
+        # Skip if no perplexity-flavored column.
+        if not any(ppl_col.search(c) or kld_col.search(c) for c in header):
+            continue
+
+        # Map column-purpose → header index. A column may be PPL-only,
+        # delta-only, or hybrid (header contains both keywords). Track each
+        # candidate column with a flag so we can pull both signals from a
+        # hybrid column's data cells.
+        idx_quant = next((j for j, c in enumerate(header) if quant_col.search(c)), None)
+        idx_ppl = None
+        idx_delta = None
+        idx_hybrid = None  # one column carrying both PPL and delta
+        for j, c in enumerate(header):
+            has_ppl = bool(ppl_col.search(c))
+            has_delta = bool(delta_col.search(c))
+            if has_ppl and has_delta and idx_hybrid is None:
+                idx_hybrid = j
+            elif has_ppl and not has_delta and idx_ppl is None:
+                idx_ppl = j
+            elif has_delta and not has_ppl and idx_delta is None:
+                idx_delta = j
+        idx_kld = next((j for j, c in enumerate(header) if kld_col.search(c)), None)
+        if idx_quant is None:
+            continue
+
+        for row in block[2:]:
+            row_cells = cells(row)
+            if len(row_cells) <= idx_quant:
+                continue
+            quant_cell = row_cells[idx_quant]
+            quant = parse_quant_from_filename(quant_cell)
+            if quant is None:
+                # Sometimes the cell is just the bare tag like "Q4_K_M".
+                upper = quant_cell.upper().strip()
+                if upper in _QUANT_TAGS:
+                    quant = upper
+            if quant is None:
+                continue
+
+            ppl = None
+            delta = None
+            kld = None
+            # Hybrid column: cell shape ``"5.7234 (+0.0936)"`` — first float is
+            # PPL, in-parens value is delta.
+            if idx_hybrid is not None and idx_hybrid < len(row_cells):
+                cell = row_cells[idx_hybrid]
+                ppl = _parse_float_cell(cell)
+                m = re.search(r"\(([+\-]?\d+\.\d+)\)", cell)
+                if m:
+                    delta = float(m.group(1))
+            if idx_ppl is not None and idx_ppl < len(row_cells) and ppl is None:
+                ppl = _parse_float_cell(row_cells[idx_ppl])
+            if idx_delta is not None and idx_delta < len(row_cells) and delta is None:
+                delta = _parse_float_cell(row_cells[idx_delta])
+            if idx_kld is not None and idx_kld < len(row_cells):
+                kld = _parse_float_cell(row_cells[idx_kld])
+            if quant not in out:
+                out[quant] = PerplexityEntry(
+                    quant=quant, ppl=ppl, ppl_delta_f16=delta, kld=kld,
+                )
+    return out
+
+
+def _parse_float_cell(cell: str) -> Optional[float]:
+    """Pull the first signed float out of a markdown table cell. None on miss."""
+    m = re.search(r"[+\-]?\d+\.\d+", cell)
+    if not m:
+        return None
+    try:
+        return float(m.group(0))
+    except ValueError:
+        return None
+
+
 def _variants_from_files(repo_id: str, files: list[dict]) -> list[GGUFVariant]:
     """Group shards under their canonical de-sharded name; one variant per group.
 
@@ -385,6 +529,7 @@ def discover_gguf_variants(
     timeout: float = _DEFAULT_TIMEOUT,
     max_repos_to_try: int = 12,
     use_cache: bool = True,
+    with_perplexity: bool = True,
 ) -> list[GGUFVariant]:
     """Find available GGUF quantizations for a base model.
 
@@ -393,21 +538,50 @@ def discover_gguf_variants(
       2. If none hit, fall back to a Hub search for ``{base}-GGUF`` repos.
       3. For the first repo found, list ``.gguf`` files and parse quant
          tags from filenames. Multi-shard quants are summed into one entry.
+      4. F5: optionally fetch the repo's README and parse any perplexity
+         tables, attaching ``ppl_delta_f16`` / ``kld`` to matching variants.
 
     Network failures, missing repos, and unparseable filenames degrade
     silently to an empty list. Results are cached for ``cache_ttl`` seconds
     so repeated wizard runs don't hammer the API.
     """
+    # Test/CI escape hatch: skip the network round-trip entirely.
+    if os.environ.get("VRAM_BUDGET_SKIP_LIVE_GGUF") == "1":
+        return []
+
     cdir = cache_dir or _DEFAULT_CACHE_DIR
     cpath = _cache_path(cdir, model_name)
     if use_cache:
         cached = _read_cache(cpath, cache_ttl)
         if cached is not None:
-            return [GGUFVariant(**v) for v in cached]
+            # Cache shape bump for F5: old format was a flat list of variants;
+            # new format is {"variants": [...]} so we can stash sibling data.
+            if isinstance(cached, dict) and "variants" in cached:
+                return [GGUFVariant(**v) for v in cached["variants"]]
+            # Old-shape cache → discard and re-fetch.
 
     repo_id, files = _pick_repo(
         model_name, max_repos_to_try=max_repos_to_try, timeout=timeout,
     )
-    out = _variants_from_files(repo_id, files) if repo_id else []
-    _write_cache(cpath, [asdict(v) for v in out])
-    return out
+    variants = _variants_from_files(repo_id, files) if repo_id else []
+
+    # F5: enrich variants with perplexity data from the repo README.
+    if with_perplexity and variants and repo_id:
+        ppl_map = _fetch_perplexity_for_repo(repo_id, timeout=timeout)
+        for v in variants:
+            entry = ppl_map.get(v.quant)
+            if entry:
+                v.ppl_delta_f16 = entry.ppl_delta_f16
+                v.kld = entry.kld
+
+    _write_cache(cpath, {"variants": [asdict(v) for v in variants]})
+    return variants
+
+
+def _fetch_perplexity_for_repo(
+    repo_id: str, *, timeout: float,
+) -> dict[str, PerplexityEntry]:
+    """Pull the repo's README.md and parse any perplexity tables. Empty on miss."""
+    url = f"https://huggingface.co/{urllib.parse.quote(repo_id, safe='/')}/raw/main/README.md"
+    md = _http_get_text(url, timeout=timeout)
+    return _parse_md_perplexity_tables(md or "")

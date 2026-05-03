@@ -17,8 +17,10 @@ import pytest
 from vram_budget.integrations import huggingface_gguf as hfg
 from vram_budget.integrations.huggingface_gguf import (
     GGUFVariant,
+    PerplexityEntry,
     _candidate_repos,
     _is_derivative_repo,
+    _parse_md_perplexity_tables,
     _ranked_search_results,
     _split_model_name,
     _variants_from_files,
@@ -270,14 +272,18 @@ def test_discover_uses_cache_and_skips_network(tmp_path, monkeypatch):
     """A fresh cache file short-circuits the network path entirely."""
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
-    cached_payload = [
-        {
-            "repo_id": "bartowski/Foo-GGUF",
-            "filename": "Foo-Q4_K_M.gguf",
-            "quant": "Q4_K_M",
-            "size_bytes": 4_500_000_000,
-        }
-    ]
+    cached_payload = {
+        "variants": [
+            {
+                "repo_id": "bartowski/Foo-GGUF",
+                "filename": "Foo-Q4_K_M.gguf",
+                "quant": "Q4_K_M",
+                "size_bytes": 4_500_000_000,
+                "ppl_delta_f16": 0.05,
+                "kld": None,
+            }
+        ]
+    }
     cpath = cache_dir / "Foo_Foo.json"
     cpath.write_text(json.dumps(cached_payload))
 
@@ -300,9 +306,9 @@ def test_discover_ignores_expired_cache(tmp_path, monkeypatch):
     cache_dir = tmp_path / "cache"
     cache_dir.mkdir()
     cpath = cache_dir / "Foo_Foo.json"
-    cpath.write_text(json.dumps([{
+    cpath.write_text(json.dumps({"variants": [{
         "repo_id": "stale", "filename": "x.gguf", "quant": "Q2_K", "size_bytes": 1,
-    }]))
+    }]}))
     # Backdate the file beyond the TTL.
     old = time.time() - 10_000
     os.utime(cpath, (old, old))
@@ -316,10 +322,37 @@ def test_discover_ignores_expired_cache(tmp_path, monkeypatch):
 
     out = discover_gguf_variants(
         "Foo/Foo", cache_dir=cache_dir, cache_ttl=3600,
+        with_perplexity=False,
     )
     assert len(out) == 1
     assert out[0].repo_id == "fresh/repo-GGUF"
     assert out[0].quant == "Q4_K_M"
+
+
+def test_discover_discards_old_format_cache(tmp_path, monkeypatch):
+    """F5 bumped the cache shape from flat list to {'variants': [...]}.
+    Old-format caches should be discarded as if expired."""
+    cache_dir = tmp_path / "cache"
+    cache_dir.mkdir()
+    cpath = cache_dir / "Foo_Foo.json"
+    # Old format: flat list (pre-F5).
+    cpath.write_text(json.dumps([{
+        "repo_id": "old-format", "filename": "x.gguf", "quant": "Q2_K", "size_bytes": 1,
+    }]))
+
+    def _stub_pick(model_name, *, max_repos_to_try, timeout):
+        return "fresh/repo-GGUF", [
+            {"path": "model-Q4_K_M.gguf", "size": 5_000_000_000},
+        ]
+    monkeypatch.setattr(hfg, "_pick_repo", _stub_pick)
+
+    out = discover_gguf_variants(
+        "Foo/Foo", cache_dir=cache_dir, cache_ttl=3600,
+        with_perplexity=False,
+    )
+    # Should have re-fetched, ignoring the old-format payload.
+    assert len(out) == 1
+    assert out[0].repo_id == "fresh/repo-GGUF"
 
 
 def test_discover_returns_empty_on_network_failure(tmp_path, monkeypatch):
@@ -343,6 +376,96 @@ def test_http_helper_failure_returns_empty(monkeypatch):
     monkeypatch.setattr(hfg, "_http_get_json", _raise)
     assert hfg._list_repo_files("any/repo", timeout=1.0) == []
     assert hfg._search_gguf_repos("anything", limit=1, timeout=1.0) == []
+
+
+# ─── F5: perplexity README parser ──────────────────────────────────────────
+
+
+_BARTOWSKI_STYLE_README = """
+# Llama-3-8B GGUF
+
+Some intro text.
+
+| Filename | Quant type | File Size | Perplexity (Δ vs F16) |
+|----------|------------|-----------|------------------------|
+| Llama-3-8B-Q8_0.gguf | Q8_0 | 8.54GB | 5.7234 (+0.0042) |
+| Llama-3-8B-Q5_K_M.gguf | Q5_K_M | 5.73GB | 5.7530 (+0.0338) |
+| Llama-3-8B-Q4_K_M.gguf | Q4_K_M | 4.92GB | 5.8128 (+0.0936) |
+| Llama-3-8B-Q2_K.gguf | Q2_K | 3.18GB | 6.4521 (+0.7329) |
+
+Some trailing text.
+"""
+
+_KLD_ONLY_README = """
+| Quant | File Size | KL-Divergence |
+|-------|-----------|---------------|
+| Q4_K_M | 4.5GB | 0.012 |
+| Q3_K_S | 3.4GB | 0.034 |
+"""
+
+_NO_TABLE_README = """
+# Just some text.
+
+No tables here. Some paragraphs about the model.
+"""
+
+
+def test_parse_bartowski_style_table_extracts_deltas():
+    out = _parse_md_perplexity_tables(_BARTOWSKI_STYLE_README)
+    assert "Q8_0" in out
+    assert "Q5_K_M" in out
+    assert "Q4_K_M" in out
+    assert "Q2_K" in out
+    # Delta is recovered from the parenthetical.
+    assert out["Q4_K_M"].ppl_delta_f16 == pytest.approx(0.0936)
+    assert out["Q2_K"].ppl_delta_f16 == pytest.approx(0.7329)
+    # Absolute PPL also captured.
+    assert out["Q4_K_M"].ppl == pytest.approx(5.8128)
+
+
+def test_parse_kld_only_table():
+    out = _parse_md_perplexity_tables(_KLD_ONLY_README)
+    assert "Q4_K_M" in out
+    assert out["Q4_K_M"].kld == pytest.approx(0.012)
+    assert out["Q4_K_M"].ppl is None
+    assert out["Q4_K_M"].ppl_delta_f16 is None
+
+
+def test_parse_returns_empty_on_no_table():
+    out = _parse_md_perplexity_tables(_NO_TABLE_README)
+    assert out == {}
+
+
+def test_parse_returns_empty_on_html_table():
+    """Exotic HTML table format shouldn't crash; just returns empty."""
+    html = "<table><tr><th>Quant</th><th>PPL</th></tr><tr><td>Q4_K_M</td><td>5.8</td></tr></table>"
+    out = _parse_md_perplexity_tables(html)
+    assert out == {}
+
+
+def test_parse_handles_separator_row():
+    """The markdown ``|---|---|`` separator must not be misread as data."""
+    md = """
+| Quant | PPL |
+|-------|-----|
+| Q4_K_M | 5.8 |
+"""
+    out = _parse_md_perplexity_tables(md)
+    # Only the data row should be parsed; separator should not produce a fake entry.
+    assert list(out.keys()) == ["Q4_K_M"]
+
+
+def test_parse_tolerates_filename_in_quant_column():
+    md = """
+| Filename | Perplexity |
+|----------|------------|
+| Llama-3-8B-Q4_K_M.gguf | 5.81 |
+| Llama-3-8B-Q2_K.gguf | 6.45 |
+"""
+    out = _parse_md_perplexity_tables(md)
+    assert "Q4_K_M" in out
+    assert "Q2_K" in out
+    assert out["Q4_K_M"].ppl == pytest.approx(5.81)
 
 
 # ─── Live integration test (opt-in) ────────────────────────────────────────

@@ -33,6 +33,9 @@ def _spawn_and_drive(cmd_argv: list[str], keys: list[bytes],
 
     pid, fd = pty.fork()
     if pid == 0:
+        # Skip the live-GGUF HF Hub round-trip in PTY tests so the subprocess
+        # doesn't hang on a 5-15 s network call after the last key is sent.
+        os.environ["VRAM_BUDGET_SKIP_LIVE_GGUF"] = "1"
         os.execvp(cmd_argv[0], cmd_argv)
     os.set_blocking(fd, False)
     out = b""
@@ -189,23 +192,36 @@ def test_inference_mode_renders_quantization_table(vram_budget_cmd):
         DOWN * 3 + ENTER,                # mode = inference (4th option)
         b"4090", ENTER,                  # gpu via filter
         ENTER,                           # 1 GPU
-        ENTER,                           # default RAM
+        # No RAM prompt in inference mode (skipped intentionally).
         ENTER,                           # default PCIe Gen 4
-        b"llama3 8b", ENTER,             # arch
+        b"llama3_8b", ENTER,             # arch (use exact preset name to dodge sort drift)
         ENTER,                           # seq_len default 4096
         ENTER,                           # batch default 1
-        DOWN + ENTER,                    # quit
+        ENTER,                           # serving runtime default (system-aware)
+        ENTER,                           # KV cache precision default (bf16)
+        ENTER,                           # lm_head precision default ('match')
+        ENTER,                           # embeddings precision default ('match')
+        ENTER,                           # F6 'Add a draft?' default (no)
+        # No "What now?" prompt — wizard exits after render.
     ]
-    text = _spawn_and_drive(vram_budget_cmd, keys, max_s=20)
+    # Live GGUF lookup may take ~5-15s on cold cache while it queries HF Hub.
+    text = _spawn_and_drive(vram_budget_cmd, keys, max_s=45)
     clean = _strip_ansi(text)
     assert "Inference quantization" in clean, (
         f"inference section missing:\n{clean[-1500:]}"
     )
-    assert "Per-precision fit" in clean
+    # Two valid render branches: (a) live GGUF table from HF Hub when the
+    # model has community GGUFs, (b) synthetic per-precision sweep otherwise.
+    is_live_gguf = "Live GGUF variants on Hugging Face" in clean
+    is_synthetic = "Per-precision fit" in clean
+    assert is_live_gguf or is_synthetic, (
+        f"expected either live-GGUF or synthetic table; saw neither:\n{clean[-1500:]}"
+    )
     assert "Recommendation" in clean or "No quantization fits" in clean
-    # The 7-row precision sweep should all appear
-    for tag in ("fp32", "bf16", "fp8", "int8", "q4", "q3", "q2"):
-        assert tag in clean, f"precision {tag!r} not in output"
+    if is_synthetic:
+        # Synthetic branch: 7-row precision sweep should all appear
+        for tag in ("fp32", "bf16", "fp8", "int8", "q4", "q3", "q2"):
+            assert tag in clean, f"precision {tag!r} not in output"
     assert _count_incomplete_csi(text) == 0
 
 

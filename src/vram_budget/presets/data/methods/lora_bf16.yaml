@@ -15,3 +15,4 @@ lora:
   target_modules: [q_proj, k_proj, v_proj, o_proj, gate_proj, up_proj, down_proj]
 overhead_train_gb: 1.5
 overhead_infer_gb: 0.5
+attention_impl: flash_attn_2

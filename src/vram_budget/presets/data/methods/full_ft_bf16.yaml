@@ -12,3 +12,4 @@ batch_size: 1
 grad_accum_steps: 16
 overhead_train_gb: 1.5
 overhead_infer_gb: 0.5
+attention_impl: flash_attn_2

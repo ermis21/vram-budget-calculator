@@ -17,3 +17,4 @@ qlora:
   base_quant_bits: 8     # int8 frozen base — less aggressive than NF4
 overhead_train_gb: 1.5
 overhead_infer_gb: 0.5
+attention_impl: flash_attn_2

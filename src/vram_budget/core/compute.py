@@ -51,7 +51,7 @@ def compute(
     """
     pb = compute_param_breakdown(arch, method)
     train = compute_train_memory(arch, method, hardware, breakdown=pb)
-    infer = compute_infer_memory(arch, method, breakdown=pb)
+    infer = compute_infer_memory(arch, method, breakdown=pb, hardware=hardware)
     flops = compute_flops_per_token(arch, method, breakdown=pb)
 
     times: list[TimeEstimate] = []

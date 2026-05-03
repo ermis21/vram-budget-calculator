@@ -12,6 +12,7 @@ just its serialized form.
 
 from __future__ import annotations
 
+from datetime import date
 from typing import Annotated, Any, Literal, Optional
 
 import yaml
@@ -216,6 +217,9 @@ class ModelArchSpec(_Strict):
     weight_precision_schedule: WeightPrecisionScheduleSpec = Field(
         default_factory=WeightPrecisionScheduleSpec
     )
+    # Original release date (ISO yyyy-mm-dd in YAML). Used to rank presets
+    # newest-first in the wizard. Optional so user-supplied YAMLs keep loading.
+    release_date: Optional[date] = None
 
     @model_validator(mode="after")
     def _check_schedule_length(self) -> "ModelArchSpec":
@@ -284,6 +288,13 @@ class HardwareSpec(_Strict):
     # don't need to be updated; the wizard lets the user override at runtime.
     system_ram_gb: float = Field(64.0, gt=0)
     pcie_gen: Literal[3, 4, 5] = 4
+
+    # Optional metadata used by the recommendation scorer (recommend.py).
+    # release_date is the consumer-launch / availability date. price_usd is a
+    # rough current street price (new for current-gen, used for older parts).
+    # Both optional — unknown values fall back to neutral scores.
+    release_date: Optional[date] = None
+    price_usd: Optional[float] = Field(default=None, gt=0)
 
     # ------------------------------------------------------------------
     # Derived helpers (used downstream)
@@ -429,6 +440,51 @@ class QLoRASpec(_Strict):
 
 TrainingKind = Literal["full", "lora", "qlora"]
 
+# Attention implementation. The calculator's pre-F1 activation math has no
+# seq² term — it implicitly assumes FlashAttention. ``flash_attn_2`` documents
+# that default; ``vanilla`` opts into the materialized-attention-matrix model
+# (rare today, used by some research code).
+AttentionImpl = Literal[
+    "vanilla", "flash_attn_2", "flash_attn_3",
+    "xformers", "sdpa_math", "sdpa_mem_efficient",
+]
+
+# Inference serving runtime. ``auto`` picks from hardware (Apple → llama_cpp,
+# datacenter NVIDIA / multi-GPU → vllm, otherwise llama_cpp). Each concrete
+# runtime carries a profile of (kv_overhead, paged_block, workspace_gb,
+# decode_efficiency); see ``core/runtime.py``.
+Runtime = Literal[
+    "auto", "hf", "vllm", "sglang", "tgi", "llama_cpp",
+]
+
+
+class InferencePrecisionSpec(_Strict):
+    """Per-component precision overrides for inference (filled in by F4).
+
+    All fields default to ``None`` meaning "inherit from method.precision.weights"
+    (or the explicit ``kv_precision`` kwarg for KV). ``attention_compute`` is
+    informational only — it nudges the F3 roofline ``util`` modifier; it does
+    NOT change memory accounting.
+    """
+
+    weights: Optional[PrecisionName] = None
+    kv: Optional[PrecisionName] = None
+    lm_head: Optional[PrecisionName] = None
+    embeddings: Optional[PrecisionName] = None
+    attention_compute: Optional[PrecisionName] = None
+
+
+class ServingSpec(_Strict):
+    """Inference-only namespace.
+
+    Lives on ``TrainingMethodSpec.serving`` so a single method spec can be
+    reused for both training and inference paths. Training paths ignore this
+    block entirely.
+    """
+
+    runtime: Runtime = "auto"
+    precision: Optional[InferencePrecisionSpec] = None
+
 
 class TrainingMethodSpec(_Strict):
     """Training method, optimizer, precision, and per-step shape (seq/batch/accum)."""
@@ -444,6 +500,8 @@ class TrainingMethodSpec(_Strict):
     qlora: QLoRASpec = Field(default_factory=QLoRASpec)
     overhead_train_gb: float = Field(1.5, ge=0.0)
     overhead_infer_gb: float = Field(0.5, ge=0.0)
+    attention_impl: AttentionImpl = "flash_attn_2"
+    serving: ServingSpec = Field(default_factory=ServingSpec)
 
     @model_validator(mode="after")
     def _check_kind_consistency(self) -> "TrainingMethodSpec":

@@ -91,6 +91,17 @@ def _free_knobs(args_free: list[str]) -> dict[str, list]:
 # ─────────────────────────────────────────────────────────────────────────────
 
 
+def _warn_fa3_non_hopper(method, hw) -> None:
+    """FA3 only runs on Hopper+. Don't block, just flag."""
+    if method.attention_impl == "flash_attn_3":
+        gen = (hw.gen or "").lower()
+        if "hopper" not in gen:
+            sys.stderr.write(
+                f"  warning: attention_impl=flash_attn_3 but hardware.gen={hw.gen!r} "
+                f"doesn't look like Hopper+ — falling back to FA2 in practice may be required.\n"
+            )
+
+
 def cmd_fit(args) -> int:
     hw = get_gpu(args.gpu)
     arch = get_model(args.arch)
@@ -102,6 +113,13 @@ def cmd_fit(args) -> int:
         method = method.model_copy(update={"batch_size": args.batch})
     if args.grad_accum is not None:
         method = method.model_copy(update={"grad_accum_steps": args.grad_accum})
+    if args.attention_impl is not None:
+        method = method.model_copy(update={"attention_impl": args.attention_impl})
+    if args.runtime is not None:
+        method = method.model_copy(update={
+            "serving": method.serving.model_copy(update={"runtime": args.runtime})
+        })
+    _warn_fa3_non_hopper(method, hw)
 
     result = compute(arch, hw, method)
 
@@ -156,6 +174,9 @@ def cmd_frontier(args) -> int:
     method = get_method(args.method)
     if args.seq_len is not None:
         method = method.model_copy(update={"seq_len": args.seq_len})
+    if args.attention_impl is not None:
+        method = method.model_copy(update={"attention_impl": args.attention_impl})
+    _warn_fa3_non_hopper(method, hw)
 
     # Template: either a bundled model name or a YAML path
     template_path = Path(args.arch_template)
@@ -212,6 +233,9 @@ def cmd_time(args) -> int:
     hw = get_gpu(args.gpu)
     arch = get_model(args.arch)
     method = get_method(args.method)
+    if args.attention_impl is not None:
+        method = method.model_copy(update={"attention_impl": args.attention_impl})
+    _warn_fa3_non_hopper(method, hw)
     # Quick param count to resolve multipliers
     from vram_budget.core.params import compute_param_breakdown
     pb = compute_param_breakdown(arch, method)
@@ -336,6 +360,13 @@ def main(argv: Optional[list[str]] = None) -> int:
     sp.add_argument("--seq-len", type=int, default=None)
     sp.add_argument("--batch", type=int, default=None)
     sp.add_argument("--grad-accum", type=int, default=None)
+    sp.add_argument("--attention-impl", default=None,
+                    choices=["vanilla", "flash_attn_2", "flash_attn_3",
+                             "xformers", "sdpa_math", "sdpa_mem_efficient"],
+                    help="attention implementation (default: flash_attn_2 — matches HF Trainer / axolotl / unsloth)")
+    sp.add_argument("--runtime", default=None,
+                    choices=["auto", "hf", "vllm", "sglang", "tgi", "llama_cpp"],
+                    help="inference serving runtime (default: auto — picks vllm for datacenter/multi-GPU, llama_cpp otherwise)")
     sp.add_argument("--json", action="store_true")
     sp.add_argument("--plain", action="store_true")
     sp.set_defaults(func=cmd_fit)
@@ -350,6 +381,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     sp.add_argument("--free", nargs="*", default=[],
                     help="key=v1,v2,v3  (e.g. num_hidden_layers=24,32,40)")
     sp.add_argument("--seq-len", type=int, default=None)
+    sp.add_argument("--attention-impl", default=None,
+                    choices=["vanilla", "flash_attn_2", "flash_attn_3",
+                             "xformers", "sdpa_math", "sdpa_mem_efficient"],
+                    help="attention implementation (default: flash_attn_2)")
     sp.add_argument("--objective", default="max_total_params",
                     choices=["max_total_params", "max_active_params"])
     sp.add_argument("--output", default="table", choices=["table", "csv", "json"])
@@ -362,6 +397,10 @@ def main(argv: Optional[list[str]] = None) -> int:
     sp.add_argument("--method", default="full_ft_bf16")
     sp.add_argument("--tokens", default="1.5x,2x",
                     help="comma-separated; 1.5x|2x = N× total params, 15B = 15 billion absolute")
+    sp.add_argument("--attention-impl", default=None,
+                    choices=["vanilla", "flash_attn_2", "flash_attn_3",
+                             "xformers", "sdpa_math", "sdpa_mem_efficient"],
+                    help="attention implementation (default: flash_attn_2)")
     sp.add_argument("--json", action="store_true")
     sp.set_defaults(func=cmd_time)
 

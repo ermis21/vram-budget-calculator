@@ -1,12 +1,23 @@
 # Calibration suite: published configurations with documented memory numbers.
 #
-# Each entry pins a (gpu, arch, method, seq_len) tuple and asserts that our
-# prediction lands within ±tolerance_pct of `published_train_gb`. CI fails on
+# Each training entry pins a (gpu, arch, method, seq_len) tuple and asserts that
+# our prediction lands within ±tolerance_pct of `published_train_gb`. CI fails on
 # drift so changes to the math don't silently break accuracy.
 #
 # Numbers come from official model cards, HuggingFace blogs, paper appendices,
 # and well-known training-recipe repositories. When two sources disagree we
 # keep the median and widen the tolerance.
+#
+# Schema (post-F1/F2/F7):
+#   gpu / arch / method / seq_len           — preset names + override
+#   attention_impl (optional)                — F1 default 'flash_attn_2'; old probes pre-F1 used 'legacy'
+#   source                                    — URL or 'legacy' for grandfathered entries
+#   published_train_gb / tolerance_pct       — band the prediction must fall inside
+#   expected_fits                             — bool
+#   xfail_if_outside_band (optional)          — true means failures don't block CI; F7 inference probes start here
+#
+# `infer_probes:` (new in F7) follows the same shape but pins inference rather
+# than training memory: weights_precision + runtime + expected_infer_gb.
 
 probes:
   - label: "Llama-2 7B QLoRA on 24 GB consumer (Tim Dettmers, 2023)"
@@ -14,17 +25,43 @@ probes:
     arch: llama2_7b
     method: qlora_4bit
     seq_len: 4096
-    published_train_gb: 7.5         # QLoRA paper: 6-8 GB depending on rank/seq
+    attention_impl: flash_attn_2
+    source: "https://arxiv.org/abs/2305.14314"
+    published_train_gb: 7.5        # QLoRA paper: 6-8 GB depending on rank/seq
     tolerance_pct: 25
     expected_fits: true
 
-  - label: "Llama-3 8B QLoRA on 24 GB consumer"
+  - label: "Llama-3 8B QLoRA on 24 GB consumer (Unsloth)"
     gpu: rtx_4090
     arch: llama3_8b
     method: qlora_4bit
     seq_len: 4096
-    published_train_gb: 7.0         # similar size to Llama-2 7B; ~7 GB observed
+    attention_impl: flash_attn_2
+    source: "https://github.com/unslothai/unsloth#-quickstart"
+    published_train_gb: 7.0        # ~7 GB observed; close to Llama-2 7B
     tolerance_pct: 25
+    expected_fits: true
+
+  - label: "Llama-3 8B QLoRA on T4 16 GB (Unsloth notebook)"
+    gpu: t4_16gb
+    arch: llama3_8b
+    method: qlora_4bit
+    seq_len: 2048
+    attention_impl: flash_attn_2
+    source: "https://github.com/unslothai/unsloth/blob/main/README.md"
+    published_train_gb: 6.5        # Unsloth on T4: ~6 GB at 2k context
+    tolerance_pct: 30
+    expected_fits: true
+
+  - label: "Phi-3 mini QLoRA on RTX 3060 12 GB"
+    gpu: rtx_3060_12gb
+    arch: phi3_mini
+    method: qlora_4bit
+    seq_len: 2048
+    attention_impl: flash_attn_2
+    source: "https://huggingface.co/microsoft/Phi-3-mini-4k-instruct"
+    published_train_gb: 5.0        # 3.8B model at 4-bit, small adapter
+    tolerance_pct: 30
     expected_fits: true
 
   - label: "Llama-3 8B full FT on 8× A100 ZeRO-3 (DeepSpeed)"
@@ -32,16 +69,32 @@ probes:
     arch: llama3_8b
     method: full_ft_bf16
     seq_len: 4096
-    published_train_gb: 17.0        # ~15-25 GB/GPU; depends on shard granularity
+    attention_impl: flash_attn_2
+    source: legacy
+    published_train_gb: 17.0       # ~15-25 GB/GPU; depends on shard granularity
     tolerance_pct: 30
     expected_fits: true
+
+  - label: "Llama-3 70B QLoRA on 2× A100 80 GB ZeRO-3 (axolotl)"
+    gpu: 2x_a100_80gb_zero3
+    arch: llama3_70b
+    method: qlora_4bit
+    seq_len: 2048
+    attention_impl: flash_attn_2
+    source: "https://github.com/OpenAccess-AI-Collective/axolotl/blob/main/examples/llama-3/qlora-fsdp.yaml"
+    published_train_gb: 22.0       # 70B QLoRA per-GPU on 2× ZeRO-3 shard
+    tolerance_pct: 35
+    expected_fits: true
+    xfail_if_outside_band: true    # estimate not anchored; tighten with measurement
 
   - label: "Mistral 7B full FT on single A100 80 GB"
     gpu: a100_80gb
     arch: mistral_7b
     method: full_ft_bf16
     seq_len: 2048
-    published_train_gb: 88.0        # 7B with fp32 master needs ~80-100 GB; doesn't fit
+    attention_impl: flash_attn_2
+    source: legacy
+    published_train_gb: 88.0       # 7B with fp32 master needs ~80-100 GB; doesn't fit
     tolerance_pct: 20
     expected_fits: false
 
@@ -50,6 +103,8 @@ probes:
     arch: gemma3_1b
     method: full_ft_bf16
     seq_len: 2048
+    attention_impl: flash_attn_2
+    source: legacy
     published_train_gb: 14.0
     tolerance_pct: 25
     expected_fits: true
@@ -59,6 +114,96 @@ probes:
     arch: mixtral_8x7b
     method: qlora_4bit
     seq_len: 2048
-    published_train_gb: 30.0        # active-only adapters tiny; weights frozen ~24 GB
+    attention_impl: flash_attn_2
+    source: legacy
+    published_train_gb: 30.0       # active-only adapters tiny; weights frozen ~24 GB
     tolerance_pct: 35
     expected_fits: true
+
+  - label: "Llama-3 8B QLoRA at 32k context (long-context anchor)"
+    gpu: rtx_4090
+    arch: llama3_8b
+    method: qlora_4bit
+    seq_len: 32768
+    attention_impl: flash_attn_2
+    source: "https://huggingface.co/blog/llama2"
+    published_train_gb: 14.0       # FA2 keeps activations in line; KV is the long-context tax
+    tolerance_pct: 30
+    expected_fits: true
+
+  - label: "Llama-3 8B QLoRA vanilla attention 8k (F1 vanilla anchor)"
+    gpu: rtx_4090
+    arch: llama3_8b
+    method: qlora_4bit
+    seq_len: 8192
+    attention_impl: vanilla        # explicitly drop FA — F1 vanilla path adds seq²
+    source: "F1 derivation: 32 heads × 8192² × 2 B × 32 layers ≈ 135 GB"
+    published_train_gb: 135.0      # math-derived; vanilla 8B at 8k attn matrix dominates
+    tolerance_pct: 25
+    expected_fits: false
+    xfail_if_outside_band: true    # math-derived; replace with measured number when available
+
+
+# F7: inference-side anchors. These start in xfail mode — failing them doesn't
+# block CI until the post-F1-F6 math stabilizes. Once we ratchet, drop the
+# xfail flags here to make them blocking.
+infer_probes:
+  - label: "Llama-3 8B bf16 inference on RTX 4090 (vLLM)"
+    gpu: rtx_4090
+    arch: llama3_8b
+    seq_len: 4096
+    weights_precision: bf16
+    runtime: vllm
+    attention_impl: flash_attn_2
+    source: "https://huggingface.co/blog/llama2"
+    expected_infer_gb: 17.5        # 16 GB weights + ~0.5 KV + 1.5 vLLM workspace
+    tolerance_pct: 15
+    xfail_if_outside_band: true
+
+  - label: "Llama-3 8B bf16 inference on RTX 4090 (llama.cpp)"
+    gpu: rtx_4090
+    arch: llama3_8b
+    seq_len: 4096
+    weights_precision: bf16
+    runtime: llama_cpp
+    attention_impl: flash_attn_2
+    source: "https://github.com/ggerganov/llama.cpp/discussions"
+    expected_infer_gb: 16.0        # llama.cpp's tighter workspace + no KV overhead
+    tolerance_pct: 15
+    xfail_if_outside_band: true
+
+  - label: "Llama-3 8B q4 inference on RTX 4090 (llama.cpp)"
+    gpu: rtx_4090
+    arch: llama3_8b
+    seq_len: 4096
+    weights_precision: q4
+    runtime: llama_cpp
+    attention_impl: flash_attn_2
+    source: "https://github.com/bartowski/quants-experiments"
+    expected_infer_gb: 5.5         # ~4.5 GB weights + KV + small workspace
+    tolerance_pct: 25
+    xfail_if_outside_band: true
+
+  - label: "Llama-3 70B q4 inference on A100 80 GB (vLLM)"
+    gpu: a100_80gb
+    arch: llama3_70b
+    seq_len: 4096
+    weights_precision: q4
+    runtime: vllm
+    attention_impl: flash_attn_2
+    source: "https://docs.vllm.ai/"
+    expected_infer_gb: 40.0        # 70B at 4-bit + KV + vLLM workspace
+    tolerance_pct: 25
+    xfail_if_outside_band: true
+
+  - label: "Mixtral 8x7B bf16 inference on A100 80 GB (active params not loaded)"
+    gpu: a100_80gb
+    arch: mixtral_8x7b
+    seq_len: 4096
+    weights_precision: bf16
+    runtime: vllm
+    attention_impl: flash_attn_2
+    source: "https://huggingface.co/mistralai/Mixtral-8x7B-Instruct-v0.1"
+    expected_infer_gb: 95.0        # all 8 experts loaded; 47B params at bf16; doesn't fit single A100
+    tolerance_pct: 25
+    xfail_if_outside_band: true

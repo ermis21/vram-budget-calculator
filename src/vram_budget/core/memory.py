@@ -89,6 +89,50 @@ def _activation_factor(grad_ckpt: str, num_layers: int) -> float:
     raise ValueError(f"unknown grad_checkpoint: {grad_ckpt!r}")
 
 
+def _activation_bytes(arch: ModelArchSpec, method: TrainingMethodSpec) -> float:
+    """Total activation memory, including the attention scratch term.
+
+    Splits into:
+      - mlp_term: per-block input/MLP activations (always present, scaled by
+        grad_checkpoint). Shape: act_factor × seq × hidden × 2 × batch.
+      - attn_term: attention scratch. For FlashAttention / xformers / SDPA
+        memory-efficient, this is small (~hidden-sized scratch + softmax stats,
+        no N² matrix). For vanilla / SDPA-math, this is the full attention
+        matrix bsz × heads × seq × seq × 2 (bf16 attention scores). Sliding
+        window attention caps the seq² term at seq × window.
+
+    Pre-F1 the calculator only had the mlp_term, which silently assumed FA.
+    F1 makes the assumption explicit and adds the vanilla path for
+    completeness.
+    """
+    seq = method.seq_len
+    bsz = method.batch_size
+    h = arch.hidden_size
+    impl = method.attention_impl
+
+    mlp_term = (
+        _activation_factor(method.grad_checkpoint, arch.num_hidden_layers)
+        * seq * h * 2.0 * bsz
+    )
+
+    if impl in ("vanilla", "sdpa_math"):
+        # Vanilla materializes a per-layer attention matrix that's NOT covered
+        # by the per-block input term. SWA caps seq² at seq×window.
+        heads = arch.attention.num_attention_heads
+        seq_b = min(seq, arch.attention.sliding_window or seq)
+        per_layer_attn = bsz * heads * seq * seq_b * 2.0
+        attn_term = arch.num_hidden_layers * per_layer_attn
+    else:
+        # FA / xformers / SDPA-mem-efficient: tile-recompute. Their workspace
+        # is dominated by the per-block fwd-input stash, which mlp_term already
+        # covers. Tile buffers and softmax stats are small enough to absorb
+        # into ``overhead_train_gb``. attn_term = 0 keeps FA2 a bit-for-bit
+        # no-op vs the pre-F1 math.
+        attn_term = 0.0
+
+    return mlp_term + attn_term
+
+
 def _grads_bytes_per_param(method: TrainingMethodSpec) -> float:
     """How many bytes the gradient accumulator buffers per trainable param."""
     return precision_bytes(method.precision.grads)
@@ -184,12 +228,11 @@ def compute_train_memory(
     optim_bytes = breakdown.trainable_params * optim_bytes_per * o_factor
 
     # ─── Activations under gradient checkpointing ───
-    h = arch.hidden_size
+    # Includes attention scratch when ``method.attention_impl`` is vanilla;
+    # FA-family implementations zero out the seq² term (covered by mlp stash).
     seq = method.seq_len
     bsz = method.batch_size
-    bytes_per_act = 2.0  # bf16/fp16 activations
-    act_factor = _activation_factor(method.grad_checkpoint, arch.num_hidden_layers)
-    activations_bytes = act_factor * seq * h * bytes_per_act * bsz
+    activations_bytes = _activation_bytes(arch, method)
 
     # ─── KV cache (training; bf16 K + bf16 V) ───
     kv_swa_bytes, kv_global_bytes = _kv_cache_bytes(arch, method, train=True)
@@ -244,8 +287,17 @@ def compute_infer_memory(
     breakdown: Optional[ParamBreakdown] = None,
     seq_len: Optional[int] = None,
     check_at_gb: tuple[float, ...] = (12.0, 16.0, 24.0, 48.0, 80.0),
+    hardware: Optional["HardwareSpec"] = None,
 ) -> InferenceMemoryReport:
-    """Inference peak: weights (no master copy, no grad, no optim) + KV cache + activations + workspace."""
+    """Inference peak: weights (no master copy, no grad, no optim) + KV cache + activations + workspace.
+
+    When ``hardware`` is provided, ``method.serving.runtime`` is applied: KV
+    bytes get a paged-block round-up + small overhead multiplier (vLLM/SGLang/
+    TGI), or pass through unchanged (llama.cpp/HF), and workspace switches to
+    the runtime's profile value (overriding ``method.overhead_infer_gb``).
+    Direct callers without ``hardware`` keep the legacy behavior — useful for
+    pure schema-level math.
+    """
     if breakdown is None:
         breakdown = compute_param_breakdown(arch, method)
 
@@ -271,7 +323,11 @@ def compute_infer_memory(
     # One-layer activations at peak (no checkpointing during inference).
     act = seq * arch.hidden_size * 2.0  # bf16
 
-    workspace = method.overhead_infer_gb * (1024 ** 3)
+    if hardware is not None:
+        from vram_budget.core.runtime import apply_runtime
+        kv, workspace = apply_runtime(kv, seq, method.serving.runtime, hardware)
+    else:
+        workspace = method.overhead_infer_gb * (1024 ** 3)
 
     total = weights + kv + act + workspace
 
@@ -365,6 +421,9 @@ class InferenceOption:
     over_by_gb: float                 # negative = headroom; positive = over budget
     budget_gb: float
     effective_budget_gb: float
+    # F3 throughput estimates (single-user latency, batch=1).
+    prefill_tps: float = 0.0          # compute-bound: aggregate TFLOPs ÷ active params
+    decode_tps: float = 0.0           # bandwidth-bound: HBM GB/s ÷ weights/GPU
 
 
 # A sentinel method used only to drive `compute_param_breakdown` for total
@@ -394,12 +453,19 @@ def inference_options(
     kv_precision: str = "bf16",
     precisions: tuple[tuple[str, str, float], ...] = _INFER_PRECISIONS,
     workspace_gb: float = 0.5,
+    runtime: str = "auto",
+    lm_head_precision: Optional[str] = None,
+    embeddings_precision: Optional[str] = None,
 ) -> list[InferenceOption]:
     """Return one row per weight-quantization choice for serving ``arch`` on
     ``hardware`` at the given sequence length, batch size, and KV precision.
 
     For each precision: weights = total_params × bytes/param × calibration overhead.
     KV cache scales with batch_size and shards across GPUs under TP/PP.
+
+    The ``runtime`` kwarg (defaults to ``auto`` → system-aware pick) applies a
+    runtime-specific KV-overhead multiplier and overrides ``workspace_gb`` with
+    the runtime's profile (vLLM 1.5 GB / TGI 1.7 GB / llama.cpp 0.3 GB / HF 1.0 GB).
 
     No optimizer state, no gradients, no master copy — pure inference.
     """
@@ -415,8 +481,19 @@ def inference_options(
     )
     kv_bytes_total = (kv_swa + kv_global) * batch_size
 
+    # Apply runtime profile: KV overhead + workspace override. The legacy
+    # ``workspace_gb`` kwarg still works as a fallback when ``runtime='hf'`` is
+    # explicitly requested but callers want a custom workspace; otherwise the
+    # runtime profile wins.
+    from vram_budget.core.runtime import apply_runtime, resolve_runtime
+    resolved_rt = resolve_runtime(runtime, hardware)  # type: ignore[arg-type]
+    kv_bytes_total, workspace_bytes = apply_runtime(
+        kv_bytes_total, seq_len, resolved_rt, hardware,
+    )
+
     # KV cache shards under TP (by attention head) and PP (by layer);
-    # stays per-GPU under replicate / single / DDP / ZeRO-*.
+    # stays per-GPU under replicate / single / DDP / ZeRO-*. Apply sharding
+    # AFTER runtime overhead so each GPU pays its fraction of the adjusted KV.
     kv_factor = hardware.per_gpu_factor_kv_cache()
     kv_bytes_per_gpu = kv_bytes_total * kv_factor
 
@@ -424,22 +501,40 @@ def inference_options(
     # Activations are batch-dependent and live on each GPU.
     act_bytes = batch_size * seq_len * arch.hidden_size * 2.0   # bf16
 
-    workspace_bytes = workspace_gb * (1024 ** 3)
-
     # Multi-GPU: weights shard under TP / PP. KV/activations stay per-GPU
     # except for sharding under TP/PP via per_gpu_factor_kv_cache above.
     weights_factor = hardware.per_gpu_factor_weights()
     budget_gb = hardware.vram_gb
     effective_budget_gb = max(0.0, budget_gb - hardware.safety_buffer_gb)
 
+    # F4: split lm_head and embeddings out of the body so they can carry their
+    # own precision. Both default to ``None`` meaning "match the row's body
+    # weights precision" (legacy behavior — total bytes equal pre-F4).
+    lm_head_p = pb.lm_head_params
+    embed_p = pb.embed_tokens_params
+    body_p = total_params - lm_head_p - embed_p
+
     out: list[InferenceOption] = []
+    from vram_budget.core.throughput import roofline
     for prec, label, overhead in precisions:
         bpp_raw = precision_bytes(prec)
         bpp = bpp_raw * overhead
-        weights_total_bytes = total_params * bpp
+        # Body weights at the row's precision (with calibration overhead).
+        body_bytes = body_p * bpp
+        # lm_head / embeddings: optional explicit override, else match the row's
+        # raw bytes/param (no calibration overhead — these aren't quantized in
+        # practice when promoted).
+        lmh_bpp = (
+            precision_bytes(lm_head_precision) if lm_head_precision is not None else bpp_raw
+        )
+        emb_bpp = (
+            precision_bytes(embeddings_precision) if embeddings_precision is not None else bpp_raw
+        )
+        weights_total_bytes = body_bytes + lm_head_p * lmh_bpp + embed_p * emb_bpp
         weights_per_gpu = weights_total_bytes * weights_factor
         total = weights_per_gpu + kv_bytes_per_gpu + act_bytes + workspace_bytes
         eff_budget_bytes = effective_budget_gb * (1024 ** 3)
+        rl = roofline(arch, hardware, weights_per_gpu, runtime=resolved_rt)
         out.append(InferenceOption(
             precision=prec,
             label=label,
@@ -453,6 +548,8 @@ def inference_options(
             over_by_gb=(total - eff_budget_bytes) / 1024**3,
             budget_gb=budget_gb,
             effective_budget_gb=effective_budget_gb,
+            prefill_tps=rl.prefill_tps,
+            decode_tps=rl.decode_tps,
         ))
     return out
 

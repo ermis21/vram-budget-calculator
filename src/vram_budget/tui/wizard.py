@@ -35,8 +35,10 @@ from vram_budget.presets import (
     get_method,
     get_model,
     list_gpus,
+    list_gpus_recommended,
     list_methods,
     list_models,
+    list_models_newest_first,
 )
 from vram_budget.tui.term import (
     BOLD,
@@ -89,15 +91,141 @@ def fmt_days(d: float) -> str:
     return f"{d / 7:.1f} wk"
 
 
+def fmt_tps(tps: float) -> str:
+    """Compact tokens/sec formatting: 78, 1.2k, 23k, 1.5M."""
+    if tps >= 1e6:
+        return f"{tps / 1e6:.1f}M"
+    if tps >= 10_000:
+        return f"{tps / 1000:.0f}k"
+    if tps >= 1000:
+        return f"{tps / 1000:.1f}k"
+    return f"{tps:.0f}"
+
+
+def _ask_draft_model(target_arch) -> str | None:
+    """Pick a draft model for F6 spec decoding.
+
+    Reuses ``list_models_newest_first()`` from the metadata agent's helper,
+    filtered to "fewer params than target". Same-family candidates (per F6's
+    dash-token comparison) are surfaced first.
+    """
+    from vram_budget.core.params import compute_param_breakdown
+    from vram_budget.core.schema import (
+        OptimizerSpec, PrecisionSpec, TrainingMethodSpec,
+    )
+    from vram_budget.core.speculative import _same_family
+
+    stub = TrainingMethodSpec(
+        kind="full",
+        optimizer=OptimizerSpec(name="adamw_bf16"),
+        precision=PrecisionSpec(weights="bf16", master=None, grads="bf16"),
+        seq_len=1, batch_size=1,
+    )
+    target_params = compute_param_breakdown(target_arch, stub).total_params
+    candidates: list[tuple[bool, int, str]] = []   # (cross-family, params, name)
+    for name in list_models_newest_first():
+        try:
+            cand = get_model(name)
+        except Exception:
+            continue
+        cand_params = compute_param_breakdown(cand, stub).total_params
+        if cand_params >= target_params:
+            continue
+        cross = not _same_family(target_arch.name, cand.name)
+        candidates.append((cross, cand_params, name))
+    candidates.sort()   # in-family (cross=False) first, then by ascending size
+
+    # Graceful empty-list handling: target is the smallest preset → no drafts.
+    if not candidates:
+        print(
+            f"  {YELLOW}no draft candidates: {target_arch.name} is already the smallest "
+            f"model in the preset library.{RESET}"
+        )
+        return None
+
+    choices: list[Choice] = []
+    for cross, params, name in candidates[:30]:
+        family_tag = "" if not cross else f" {DIM}(cross-family){RESET}"
+        size_b = params / 1e9
+        choices.append(Choice(
+            label=name,
+            description=f"{size_b:.2f}B params{family_tag}",
+        ))
+    return select_typed(
+        "Search drafts (smaller than target):",
+        choices,
+        page_size=8,
+    )
+
+
+def _render_speculative(arch_target, arch_draft, hw, spec, *, seq_len: int) -> None:
+    """Render the F6 speculative-decoding fit + speedup output."""
+    family_tag = (
+        f"{DIM}(in-family){RESET}" if not spec.cross_family
+        else f"{DIM_YELLOW}(cross-family){RESET}"
+    )
+    section(f"Speculative decoding · {arch_draft.name} drafting {arch_target.name}  {family_tag}")
+
+    eff_per_gpu = max(0.0, hw.vram_gb - hw.safety_buffer_gb)
+    info(
+        "System",
+        f"{hw.num_gpus}× {hw.name}  ·  {TEAL}{eff_per_gpu:.1f} GB usable per GPU{RESET}",
+    )
+    info(
+        "Workload",
+        f"seq_len={seq_len:,}  ·  α={spec.alpha_used:.2f}  ·  N={spec.n_draft}",
+    )
+
+    print()
+    section("Memory")
+    fits_label = (
+        f"{GREEN}✓ fits{RESET}" if spec.fits else f"{RED}✗ over budget{RESET}"
+    )
+    print(f"  Combined VRAM:    {BOLD}{gb(spec.total_bytes):.2f} GB{RESET} / "
+          f"{spec.effective_budget_gb:.2f} GB usable    {fits_label}")
+    print(f"  {DIM}Target weights:{RESET}    {gb(spec.target_weights_bytes):.2f} GB")
+    print(f"  {DIM}Draft weights:{RESET}     {gb(spec.draft_weights_bytes):.2f} GB")
+    print(f"  {DIM}Target KV:{RESET}         {gb(spec.target_kv_bytes):.2f} GB")
+    print(f"  {DIM}Draft KV:{RESET}          {gb(spec.draft_kv_bytes):.2f} GB")
+    print(f"  {DIM}Activations:{RESET}       {gb(spec.activations_bytes):.2f} GB  {DIM}(max of target/draft, sequential exec){RESET}")
+    print(f"  {DIM}Workspace:{RESET}         {gb(spec.workspace_bytes):.2f} GB")
+
+    print()
+    section("Decode throughput")
+    print(
+        f"  Target alone:     {TEAL}{fmt_tps(spec.target_decode_tps)} tok/s{RESET}"
+    )
+    print(
+        f"  With spec:        {TEAL}{BOLD}{fmt_tps(spec.spec_decode_tps)} tok/s{RESET}"
+        f"   ({spec.speedup_x:.2f}× speedup at α={spec.alpha_used:.2f})"
+    )
+    sens = spec.alpha_sensitivity
+    print(
+        f"  α sensitivity:    "
+        f"α=0.5 → {sens[0.5]:.2f}×    α=0.7 → {sens[0.7]:.2f}×    α=0.9 → {sens[0.9]:.2f}×"
+    )
+    if spec.cross_family:
+        print(
+            f"  {DIM_YELLOW}⚠  cross-family pair: α=0.4 default — measure your pair if you need a precise number.{RESET}"
+        )
+    print(f"  {DIM}override α with --alpha and N (default 4) with --n-draft on the CLI.{RESET}")
+
+
 def _gpu_choices(*, single_only: bool = True) -> list[Choice]:
-    """Return GPU presets as Choices.
+    """Return GPU presets as Choices, ranked newest + best-value first.
 
     By default (``single_only=True``) only returns presets that describe a
     single GPU model — the wizard's system builder configures count +
     parallelism on top, so the multi-GPU bundle YAMLs would be redundant.
+
+    Order comes from ``list_gpus_recommended()`` (release date weighted
+    highest, with VRAM-fit and a price bell curve). The wizard doesn't yet
+    know which model the user will pick, so we don't pass ``target_vram_gb``;
+    callers that have model context (frontier search) should call
+    ``list_gpus_recommended(target_vram_gb=…)`` directly.
     """
     out: list[Choice] = []
-    for n in list_gpus():
+    for n in list_gpus_recommended():
         try:
             hw = get_gpu(n)
             if single_only and hw.num_gpus > 1:
@@ -105,6 +233,10 @@ def _gpu_choices(*, single_only: bool = True) -> list[Choice]:
             desc = f"{hw.vram_gb:.0f} GB · {hw.bf16_tflops:.0f} TFLOPs"
             if hw.gen:
                 desc += f" · {hw.gen}"
+            if hw.release_date is not None:
+                desc += f" · {hw.release_date.year}"
+            if hw.price_usd is not None:
+                desc += f" · ${hw.price_usd:,.0f}"
             if not single_only and hw.parallelism != "single":
                 desc += f" · {hw.num_gpus}× {hw.parallelism}"
         except Exception:
@@ -126,6 +258,42 @@ _KV_PRECISION_CHOICES = [
     Choice("int8", description="½ size · AWQ-KV / SmoothQuant-KV · small loss", value="int8"),
     Choice("q4",   description="¼ size · llama.cpp Q4_KV · big long-context win, noticeable loss", value="q4"),
 ]
+
+
+# F4: lm_head + embeddings precisions. ``match`` is a sentinel meaning
+# "use whatever the row's body precision is" — keeps Enter-through identical
+# to pre-F4 output.
+_LMHEAD_PRECISION_CHOICES = [
+    Choice("match", description="match each row's body precision (default — pre-F4 behavior)", value="match"),
+    Choice("bf16",  description="bf16 — promotes lm_head above the body (more accurate output dist)", value="bf16"),
+    Choice("fp8",   description="fp8 — half size vs bf16, ~lossless with Hopper+", value="fp8"),
+    Choice("int8",  description="int8 — quarter of fp32, modest accuracy loss", value="int8"),
+]
+_EMBED_PRECISION_CHOICES = [
+    Choice("match", description="match each row's body precision (default)", value="match"),
+    Choice("bf16",  description="bf16 — promotes embeddings (rare; tied models pay 0)", value="bf16"),
+    Choice("fp8",   description="fp8 — half size", value="fp8"),
+    Choice("int8",  description="int8 — quarter size", value="int8"),
+]
+
+
+_RUNTIME_CHOICES = [
+    Choice("vllm",      description="PagedAttention, multi-GPU sharding (industry default for cloud serving)", value="vllm"),
+    Choice("sglang",    description="RadixAttention, prefix sharing — vLLM-class throughput", value="sglang"),
+    Choice("tgi",       description="HF Text Generation Inference, continuous batching", value="tgi"),
+    Choice("llama_cpp", description="GGUF loader, CPU/GPU offload (consumer single-GPU default)", value="llama_cpp"),
+    Choice("hf",        description="vanilla Transformers (smallest workspace, slowest)", value="hf"),
+]
+
+
+def _default_runtime_index(hw) -> int:
+    """Pre-highlight the system-aware runtime in the wizard's runtime prompt."""
+    from vram_budget.core.runtime import default_runtime
+    rt = default_runtime(hw)
+    for i, ch in enumerate(_RUNTIME_CHOICES):
+        if ch.value == rt:
+            return i
+    return 3  # fallback to llama_cpp
 
 # PCIe gen affects DDP/FSDP communication efficiency. These multipliers
 # scale the *base* efficiency declared on the GPU YAML or the schema default.
@@ -252,10 +420,16 @@ def _ask_system(
 
 
 def _model_choices(*, prefer_styles: bool = False) -> list[Choice]:
-    names = list_models()
-    style = sorted(n for n in names if n.endswith("_style"))
-    fixed = sorted(n for n in names if not n.endswith("_style"))
-    ordered = (style + fixed) if prefer_styles else (fixed + style)
+    # Newest released checkpoints first; templates fall to the tail because
+    # they have no release_date. Frontier mode (``prefer_styles=True``) wants
+    # templates up front instead — apply that as a stable partition after
+    # the recency sort so within-group order is preserved.
+    ordered = list_models_newest_first()
+    if prefer_styles:
+        styles = [n for n in ordered if n.endswith("_style")]
+        fixed = [n for n in ordered if not n.endswith("_style")]
+        ordered = styles + fixed
+
     out: list[Choice] = []
     for n in ordered:
         try:
@@ -273,6 +447,8 @@ def _model_choices(*, prefer_styles: bool = False) -> list[Choice]:
             # can match on it ("qwen 3.6" → finds Qwen/Qwen3.6-27B).
             tag_str = (", ".join(tags) or "dense")
             desc = f"{tag_str} · L={m.num_hidden_layers} · {m.name}"
+            if m.release_date is not None:
+                desc += f" · {m.release_date.year}"
         except Exception:
             desc = ""
         out.append(Choice(label=n, description=desc))
@@ -528,11 +704,13 @@ def _render_inference(
     seq_len: int,
     batch_size: int = 1,
     kv_precision: str = "bf16",
+    runtime: str = "auto",
 ) -> None:
     """Render the quantization-fit table for serving ``arch`` on ``hw``.
 
     One row per weight precision, with the highest-quality fitting option
-    flagged as the recommendation.
+    flagged as the recommendation. ``runtime`` is shown in the workload line
+    so the user can see which serving stack the fit verdicts assume.
     """
     section(f"Inference quantization · {arch.name}")
 
@@ -581,9 +759,15 @@ def _render_inference(
     info("System", sys_line_a)
     if sys_line_b:
         info("",  f"{DIM}{sys_line_b}{RESET}")
+    # Resolve 'auto' so the user sees the actual runtime they're getting.
+    if runtime == "auto":
+        from vram_budget.core.runtime import default_runtime
+        runtime_label = f"{default_runtime(hw)} {DIM}(auto){RESET}"
+    else:
+        runtime_label = runtime
     info(
         "Workload",
-        f"seq_len={seq_len:,}  ·  batch={batch_size}  ·  KV={kv_precision}",
+        f"seq_len={seq_len:,}  ·  batch={batch_size}  ·  KV={kv_precision}  ·  runtime={runtime_label}",
     )
 
     pb = compute_param_breakdown(arch, _infer_method_for_render(seq_len, batch_size))
@@ -618,16 +802,18 @@ def _render_inference(
             ("weights/GPU",      12),
             (kv_col_label,       14),
             (need_col,           10),
+            ("dec/pre tok/s",    14),
             ("verdict",          26),
         ]
     else:
         cols = [
-            ("precision",   28),
-            ("B/p",          7),
-            ("weights",     10),
-            (kv_col_label,  14),
-            (need_col,      10),
-            ("verdict",     26),
+            ("precision",       28),
+            ("B/p",               7),
+            ("weights",          10),
+            (kv_col_label,       14),
+            (need_col,           10),
+            ("dec/pre tok/s",    14),
+            ("verdict",          26),
         ]
     head = "  " + "  ".join(f"{DIM_YELLOW}{n:<{w}}{RESET}" for n, w in cols)
     print(head)
@@ -648,6 +834,7 @@ def _render_inference(
             )
 
         prec_label = f"{TEAL}{BOLD}{opt.label}{RESET}" if is_rec else opt.label
+        tps_cell = f"{fmt_tps(opt.decode_tps)}/{fmt_tps(opt.prefill_tps)}"
         weights_total_bytes = opt.weights_bytes * hw.num_gpus  # un-shard for display
         if weights_sharded:
             cells = [
@@ -657,7 +844,8 @@ def _render_inference(
                 (f"{gb(opt.weights_bytes):.2f} GB", cols[3][1]),
                 (f"{gb(opt.kv_cache_bytes):.2f} GB", cols[4][1]),
                 (f"{BOLD}{gb(opt.total_bytes):.2f} GB{RESET}", cols[5][1]),
-                (verdict, cols[6][1]),
+                (tps_cell, cols[6][1]),
+                (verdict, cols[7][1]),
             ]
         else:
             cells = [
@@ -666,7 +854,8 @@ def _render_inference(
                 (f"{gb(opt.weights_bytes):.2f} GB", cols[2][1]),
                 (f"{gb(opt.kv_cache_bytes):.2f} GB", cols[3][1]),
                 (f"{BOLD}{gb(opt.total_bytes):.2f} GB{RESET}", cols[4][1]),
-                (verdict, cols[5][1]),
+                (tps_cell, cols[5][1]),
+                (verdict, cols[6][1]),
             ]
         line = "  "
         for text, w in cells:
@@ -791,6 +980,10 @@ def _render_live_gguf(arch, hw, options: list, *, seq_len: int) -> bool:
 
     weights_sharded = weights_factor < 1.0
     need_col = "needs/GPU" if hw.num_gpus > 1 else "needs"
+    # F5: only show the Δ ppl column when at least one variant has data.
+    show_ppl = any(
+        v.ppl_delta_f16 is not None or v.kld is not None for v in variants
+    )
     if weights_sharded:
         cols = [
             ("quant",          12),
@@ -798,16 +991,19 @@ def _render_live_gguf(arch, hw, options: list, *, seq_len: int) -> bool:
             ("weights/GPU",    12),
             ("filename",       40),
             (need_col,         10),
-            ("verdict",        20),
+            ("dec/pre tok/s",  14),
         ]
     else:
         cols = [
-            ("quant",        12),
-            ("file size",    11),
-            ("filename",     40),
-            (need_col,       10),
-            ("verdict",      20),
+            ("quant",          12),
+            ("file size",      11),
+            ("filename",       40),
+            (need_col,         10),
+            ("dec/pre tok/s",  14),
         ]
+    if show_ppl:
+        cols.append(("Δ ppl", 9))
+    cols.append(("verdict", 20))
     head = "  " + "  ".join(f"{DIM_YELLOW}{n:<{w}}{RESET}" for n, w in cols)
     print(head)
     print(f"  {DIM}{'─' * (sum(w for _, w in cols) + 2 * (len(cols) - 1))}{RESET}")
@@ -839,6 +1035,11 @@ def _render_live_gguf(arch, hw, options: list, *, seq_len: int) -> bool:
     # The recommendation is the largest fit (== first row, since sorted desc).
     rec_v, _, _, _ = fit_rows[0]
 
+    # Compute per-variant tok/s on the fly via roofline (no live HTTP needed).
+    from vram_budget.core.runtime import resolve_runtime
+    from vram_budget.core.throughput import roofline
+    runtime = resolve_runtime("auto", hw)   # match the synthetic table's resolution
+
     for v, weights_per_gpu, total, _ in fit_rows:
         is_rec = v.quant == rec_v.quant
         need_gb = gb(total)
@@ -852,6 +1053,18 @@ def _render_live_gguf(arch, hw, options: list, *, seq_len: int) -> bool:
         fname = v.filename
         if len(fname) > 38:
             fname = fname[:35] + "..."
+        rl = roofline(arch, hw, weights_per_gpu, runtime=runtime)
+        tps_cell = f"{fmt_tps(rl.decode_tps)}/{fmt_tps(rl.prefill_tps)}"
+
+        # F5: format the Δ ppl cell. Prefer ppl_delta_f16, fall back to kld
+        # with a 'kl' suffix tag, blank if neither.
+        if show_ppl:
+            if v.ppl_delta_f16 is not None:
+                ppl_cell = f"+{v.ppl_delta_f16:.3f}" if v.ppl_delta_f16 >= 0 else f"{v.ppl_delta_f16:.3f}"
+            elif v.kld is not None:
+                ppl_cell = f"{v.kld:.3f} kl"
+            else:
+                ppl_cell = f"{DIM}—{RESET}"
 
         if weights_sharded:
             cells = [
@@ -860,7 +1073,7 @@ def _render_live_gguf(arch, hw, options: list, *, seq_len: int) -> bool:
                 (f"{gb(weights_per_gpu):.2f} GB", cols[2][1]),
                 (fname, cols[3][1]),
                 (f"{BOLD}{need_gb:.2f} GB{RESET}", cols[4][1]),
-                (verdict, cols[5][1]),
+                (tps_cell, cols[5][1]),
             ]
         else:
             cells = [
@@ -868,8 +1081,11 @@ def _render_live_gguf(arch, hw, options: list, *, seq_len: int) -> bool:
                 (f"{v.size_gb:.2f} GB", cols[1][1]),
                 (fname, cols[2][1]),
                 (f"{BOLD}{need_gb:.2f} GB{RESET}", cols[3][1]),
-                (verdict, cols[4][1]),
+                (tps_cell, cols[4][1]),
             ]
+        if show_ppl:
+            cells.append((ppl_cell, 9))
+        cells.append((verdict, 20))
         line = "  "
         for text, w in cells:
             visible = _strip_ansi(text)
@@ -1196,6 +1412,13 @@ def run_wizard() -> int:
                     batch_size = max(1, int(batch_str))
                 except ValueError:
                     batch_size = 1
+                runtime = select_one(
+                    "Serving runtime?",
+                    _RUNTIME_CHOICES,
+                    default=_default_runtime_index(hw),   # system-aware highlight
+                )
+                if runtime is None:
+                    continue
                 kv_precision = select_one(
                     "KV cache precision?",
                     _KV_PRECISION_CHOICES,
@@ -1203,18 +1426,64 @@ def run_wizard() -> int:
                 )
                 if kv_precision is None:
                     continue
+                lm_head_choice = select_one(
+                    "lm_head precision?",
+                    _LMHEAD_PRECISION_CHOICES,
+                    default=0,    # 'match' default
+                )
+                if lm_head_choice is None:
+                    continue
+                embeddings_choice = select_one(
+                    "Embeddings precision?",
+                    _EMBED_PRECISION_CHOICES,
+                    default=0,    # 'match' default
+                )
+                if embeddings_choice is None:
+                    continue
+                lm_head_precision = None if lm_head_choice == "match" else lm_head_choice
+                embeddings_precision = None if embeddings_choice == "match" else embeddings_choice
                 arch_obj = get_model(arch)
-                opts = inference_options(
-                    arch_obj, hw,
-                    seq_len=seq_len,
-                    batch_size=batch_size,
-                    kv_precision=kv_precision,
+
+                # F6: optional speculative-decoding sub-flow.
+                add_draft = select_one(
+                    "Add a draft model for speculative decoding?",
+                    [
+                        Choice("no",  description="single-model serving (current behavior)", value="no"),
+                        Choice("yes", description="pair with a smaller draft model for decode speedup", value="yes"),
+                    ],
+                    default=0,
                 )
-                _render_inference(
-                    arch_obj, hw, opts,
-                    seq_len=seq_len, batch_size=batch_size,
-                    kv_precision=kv_precision,
-                )
+                if add_draft is None:
+                    continue
+                if add_draft == "yes":
+                    draft_arch_name = _ask_draft_model(arch_obj)
+                    if draft_arch_name is None:
+                        continue
+                    draft_arch = get_model(draft_arch_name)
+                    from vram_budget.core.speculative import compute_speculative_serving
+                    spec = compute_speculative_serving(
+                        arch_obj, draft_arch, hw,
+                        seq_len=seq_len, batch_size=batch_size,
+                        kv_precision=kv_precision, runtime=runtime,
+                        target_precision="bf16", draft_precision="bf16",
+                    )
+                    _render_speculative(arch_obj, draft_arch, hw, spec, seq_len=seq_len)
+                else:
+                    opts = inference_options(
+                        arch_obj, hw,
+                        seq_len=seq_len,
+                        batch_size=batch_size,
+                        kv_precision=kv_precision,
+                        runtime=runtime,
+                        lm_head_precision=lm_head_precision,
+                        embeddings_precision=embeddings_precision,
+                    )
+                    _render_inference(
+                        arch_obj, hw, opts,
+                        seq_len=seq_len, batch_size=batch_size,
+                        kv_precision=kv_precision,
+                        runtime=runtime,
+                    )
 
             print()
             divider()
