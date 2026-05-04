@@ -27,3 +27,4 @@ attention:
   head_dim: 128
   rope:
     base_swa: 1000000.0
+release_date: 2023-12-08

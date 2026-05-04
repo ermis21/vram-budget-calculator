@@ -6,3 +6,5 @@ bf16_tflops: 60.0           # V100 fp16 dense; bf16 not natively supported (use 
 fp8_tflops: null
 multi: { num_gpus: 1, parallelism: single }
 safety_buffer_gb: 1.0
+release_date: 2018-03-27
+price_usd: 1500

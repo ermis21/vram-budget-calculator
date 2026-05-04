@@ -6,3 +6,5 @@ bf16_tflops: 22.0
 fp8_tflops: 44.0
 multi: { num_gpus: 1, parallelism: single }
 safety_buffer_gb: 0.3
+release_date: 2023-06-29
+price_usd: 300

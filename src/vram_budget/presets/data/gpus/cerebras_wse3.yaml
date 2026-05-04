@@ -12,3 +12,4 @@ fp8_tflops: 125000.0
 multi: { num_gpus: 1, parallelism: single }
 system_ram_gb: 1228800.0    # MemoryX pool can scale to ~1.2 PB
 safety_buffer_gb: 4.0
+release_date: 2024-03-13

@@ -10,3 +10,4 @@ bf16_tflops: 188.0          # Groq claim: 750 TOPS INT8 → ~188 TFLOPs bf16
 fp8_tflops: 376.0
 multi: { num_gpus: 1, parallelism: single }
 safety_buffer_gb: 0.05
+release_date: 2024-02-19

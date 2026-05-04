@@ -349,6 +349,8 @@ def select_typed(
     _write(f"\n  {YELLOW}?{RESET}  {BOLD}{question}{RESET}\n")
 
     def _render() -> int:
+        # Re-read each render so resized terminals are respected mid-pick.
+        term_w = shutil.get_terminal_size((80, 24)).columns
         printed = 0
         # Query line — show what the user has typed so far
         prompt = f"\r  {TEAL}>{RESET} {query}{DIM}{'_' if query == '' else '|'}{RESET}"
@@ -365,7 +367,19 @@ def select_typed(
             is_sel = i == idx
             marker = f"{TEAL}❯{RESET}" if is_sel else " "
             label = f"{TEAL}{BOLD}{m.label}{RESET}" if is_sel else m.label
-            desc = f"  {DIM}— {m.description}{RESET}" if m.description else ""
+            # Truncate the description so the row stays on one physical line.
+            # `printed` counts logical writes; if a row wraps, the next
+            # `_erase(printed)` under-clears and stale lines pile up.
+            # Visible budget = term_w − "   ❯  " (6) − len(label) − "  — " (4)
+            #                  − 1 column of safety against scrollback quirks.
+            desc_text = m.description
+            if desc_text:
+                desc_budget = term_w - 6 - len(m.label) - 4 - 1
+                if desc_budget < 1:
+                    desc_text = ""
+                elif len(desc_text) > desc_budget:
+                    desc_text = desc_text[: desc_budget - 1] + "…"
+            desc = f"  {DIM}— {desc_text}{RESET}" if desc_text else ""
             _write(f"\r   {marker}  {label}{desc}{NL}")
             printed += 1
 

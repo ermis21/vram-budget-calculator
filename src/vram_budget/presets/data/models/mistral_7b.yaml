@@ -26,3 +26,4 @@ attention:
   sliding_window: 4096
   rope:
     base_swa: 10000.0
+release_date: 2023-09-27

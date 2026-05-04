@@ -8,3 +8,4 @@ bf16_tflops: 300.0
 fp8_tflops: null
 multi: { num_gpus: 1, parallelism: single }
 safety_buffer_gb: 1.5
+release_date: 2024-04-30

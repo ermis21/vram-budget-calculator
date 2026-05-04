@@ -7,3 +7,5 @@ fp8_tflops: null
 multi: { num_gpus: 1, parallelism: single }
 system_ram_gb: 64.0         # same physical RAM is the system memory
 safety_buffer_gb: 2.0       # OS, runtime, and image buffers eat more on edge boards
+release_date: 2022-09-20
+price_usd: 2000

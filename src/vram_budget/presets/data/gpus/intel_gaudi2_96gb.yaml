@@ -6,3 +6,5 @@ bf16_tflops: 432.0          # Habana spec — bf16 dense
 fp8_tflops: 865.0
 multi: { num_gpus: 1, parallelism: single }
 safety_buffer_gb: 1.5
+release_date: 2022-05-10
+price_usd: 10000

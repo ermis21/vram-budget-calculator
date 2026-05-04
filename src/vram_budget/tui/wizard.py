@@ -598,7 +598,54 @@ def _recommendations(result) -> list[str]:
         out.append(f"Enable chunked CE loss (loss_chunk_size: 128) — saves {gb(train.loss_overhead_bytes):.1f} GB.")
     if result.hardware.parallelism == "single" and result.hardware.num_gpus == 1:
         out.append("With a second GPU, FSDP ZeRO-3 shards weights+grads+optim.")
+
+    # Parallelism alternative: when the user has ≥2 GPUs but the chosen
+    # strategy doesn't fit, try the other training strategies and surface
+    # the least-aggressive one that fits. Order ddp → zero2 → zero3 prefers
+    # the cheapest in communication overhead — ZeRO-3 is the safety net.
+    alt = _suggest_parallelism_alternative(result)
+    if alt is not None:
+        alt_par, alt_total = alt
+        out.append(
+            f"Switch parallelism to {alt_par} — fits at "
+            f"{gb(alt_total):.2f} GB / GPU."
+        )
     return out
+
+
+# Training-mode parallelism options in order of preference (least communication
+# overhead first). DDP keeps a full copy on every GPU; ZeRO-2 shards optimizer
+# state; ZeRO-3 also shards weights and gradients.
+_TRAIN_PARALLELISM_PREFERENCE = ("ddp", "fsdp_zero2", "fsdp_zero3")
+
+
+def _suggest_parallelism_alternative(result) -> tuple[str, int] | None:
+    """If a different parallelism strategy would fit, return (name, bytes).
+
+    Only fires for training mode with >= 2 GPUs whose current config doesn't
+    fit. Single-GPU configs have no alternative; inference modes use a
+    different set of strategies and a different renderer.
+    """
+    if result.train.fits:
+        return None
+    hw = result.hardware
+    if hw.num_gpus < 2:
+        return None
+    if hw.parallelism not in _TRAIN_PARALLELISM_PREFERENCE:
+        # E.g. inference TP/PP/replicate, or single. Out of scope here.
+        return None
+    for alt_par in _TRAIN_PARALLELISM_PREFERENCE:
+        if alt_par == hw.parallelism:
+            continue
+        alt_multi = hw.multi.model_copy(update={"parallelism": alt_par})
+        alt_hw = hw.model_copy(update={"multi": alt_multi})
+        try:
+            alt_result = compute(result.arch, alt_hw, result.method)
+        except Exception:
+            continue
+        if alt_result.train.fits:
+            return alt_par, alt_result.train.total_bytes
+    return None
 
 
 def _render_frontier(result) -> None:
@@ -783,7 +830,11 @@ def _render_inference(
     # Live GGUF is the primary output; the synthetic precision sweep is a
     # fallback for models that don't have a community GGUF on HF Hub.
     print()
-    if _render_live_gguf(arch, hw, options, seq_len=seq_len):
+    if _render_live_gguf(
+        arch, hw, options,
+        seq_len=seq_len, batch_size=batch_size,
+        kv_precision=kv_precision, runtime=runtime,
+    ):
         return
 
     section("Per-precision fit  (memory shown is per-GPU; weights split if TP/PP)")
@@ -944,7 +995,13 @@ def _infer_method_for_render(seq_len: int, batch_size: int):
     )
 
 
-def _render_live_gguf(arch, hw, options: list, *, seq_len: int) -> bool:
+def _render_live_gguf(
+    arch, hw, options: list, *,
+    seq_len: int,
+    batch_size: int = 1,
+    kv_precision: str = "bf16",
+    runtime: str = "auto",
+) -> bool:
     """Query Hugging Face for actual GGUF quants of ``arch`` and show their fit.
 
     Per-GPU non-weight bytes (KV cache, activations, workspace) are precision-
@@ -992,6 +1049,7 @@ def _render_live_gguf(arch, hw, options: list, *, seq_len: int) -> bool:
             ("filename",       40),
             (need_col,         10),
             ("dec/pre tok/s",  14),
+            ("quality",         8),    # F8: rough quality % vs F16 baseline
         ]
     else:
         cols = [
@@ -1000,6 +1058,7 @@ def _render_live_gguf(arch, hw, options: list, *, seq_len: int) -> bool:
             ("filename",       40),
             (need_col,         10),
             ("dec/pre tok/s",  14),
+            ("quality",         8),
         ]
     if show_ppl:
         cols.append(("Δ ppl", 9))
@@ -1056,6 +1115,11 @@ def _render_live_gguf(arch, hw, options: list, *, seq_len: int) -> bool:
         rl = roofline(arch, hw, weights_per_gpu, runtime=runtime)
         tps_cell = f"{fmt_tps(rl.decode_tps)}/{fmt_tps(rl.prefill_tps)}"
 
+        # F8: rough quality % vs F16 baseline. Folklore numbers — see core/quality.py.
+        from vram_budget.core.quality import quality_estimate
+        q_est = quality_estimate(v.quant)
+        quality_cell = f"~{q_est.quality_pct:.0f}%" if q_est else f"{DIM}—{RESET}"
+
         # F5: format the Δ ppl cell. Prefer ppl_delta_f16, fall back to kld
         # with a 'kl' suffix tag, blank if neither.
         if show_ppl:
@@ -1074,6 +1138,7 @@ def _render_live_gguf(arch, hw, options: list, *, seq_len: int) -> bool:
                 (fname, cols[3][1]),
                 (f"{BOLD}{need_gb:.2f} GB{RESET}", cols[4][1]),
                 (tps_cell, cols[5][1]),
+                (quality_cell, cols[6][1]),
             ]
         else:
             cells = [
@@ -1082,6 +1147,7 @@ def _render_live_gguf(arch, hw, options: list, *, seq_len: int) -> bool:
                 (fname, cols[2][1]),
                 (f"{BOLD}{need_gb:.2f} GB{RESET}", cols[3][1]),
                 (tps_cell, cols[4][1]),
+                (quality_cell, cols[5][1]),
             ]
         if show_ppl:
             cells.append((ppl_cell, 9))
@@ -1107,6 +1173,14 @@ def _render_live_gguf(arch, hw, options: list, *, seq_len: int) -> bool:
         f"  {DIM}from {RESET}{TEAL}https://huggingface.co/{rec_v.repo_id}{RESET}  "
         f"{DIM}({rec_v.size_gb:.1f} GB on disk){RESET}"
     )
+    # F8: quality estimate next to rec.
+    from vram_budget.core.quality import quality_estimate
+    rec_quality = quality_estimate(rec_v.quant)
+    if rec_quality is not None:
+        print(
+            f"  {DIM}≈ {rec_quality.quality_pct:.0f}% quality retained vs bf16 baseline "
+            f"({rec_quality.tier}-tier · folklore estimate, refines when bartowski publishes ppl){RESET}"
+        )
     print(f"  {DIM}Highest-quality real GGUF that fits on this system.{RESET}")
     # Long-context KV warning (carried over from the suppressed synthetic rec).
     if ref.kv_cache_bytes > 1.0 * 1024 ** 3:
@@ -1119,6 +1193,33 @@ def _render_live_gguf(arch, hw, options: list, *, seq_len: int) -> bool:
             f"  {DIM}Note: {rec_v.quant} is an aggressive quantization — perplexity loss "
             f"can be noticeable. Consider a smaller model at Q4 or higher if quality matters.{RESET}"
         )
+
+    # F8: lever-suggestion engine. If a single config tweak would let a
+    # higher-tier quant fit, surface it. Surface the top 2-3 only to keep
+    # the block short.
+    from vram_budget.core.optimize import suggest_quality_upgrades
+    suggestions = suggest_quality_upgrades(
+        arch, hw, variants,
+        current_rec=rec_v,
+        other_bytes=other_bytes,
+        kv_bytes_per_gpu=ref.kv_cache_bytes,
+        workspace_bytes=ref.workspace_bytes,
+        weights_factor=weights_factor,
+        eff_budget_bytes=eff_budget_bytes,
+        seq_len=seq_len,
+        batch_size=batch_size,
+        kv_precision=kv_precision,
+        runtime=runtime,
+    )
+    if suggestions:
+        print()
+        section("Want better quality?")
+        for sug in suggestions[:3]:
+            print(
+                f"  {YELLOW}·{RESET} {sug.description}  "
+                f"{DIM}→ unlocks {RESET}{TEAL}{sug.target_quant}{RESET} "
+                f"{DIM}(~{sug.target_quality_pct:.0f}%, {sug.cost_label}){RESET}"
+            )
     return True
 
 

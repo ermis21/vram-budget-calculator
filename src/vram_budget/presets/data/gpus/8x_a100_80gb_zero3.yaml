@@ -9,3 +9,5 @@ multi:
   parallelism: fsdp_zero3
   fsdp_efficiency: 0.78           # comm overhead worsens with more GPUs
 safety_buffer_gb: 1.5
+release_date: 2020-11-16
+price_usd: 120000

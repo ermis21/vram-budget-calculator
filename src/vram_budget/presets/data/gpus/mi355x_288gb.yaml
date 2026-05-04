@@ -6,3 +6,5 @@ bf16_tflops: 2300.0         # AMD claims ~2× MI325X bf16 throughput
 fp8_tflops: 4600.0
 multi: { num_gpus: 1, parallelism: single }
 safety_buffer_gb: 3.0
+release_date: 2025-06-12
+price_usd: 30000

@@ -20,3 +20,4 @@ attention:
   num_key_value_heads: 8
   head_dim: 128
   rope: { base_swa: 1000000.0 }
+release_date: 2025-04-29

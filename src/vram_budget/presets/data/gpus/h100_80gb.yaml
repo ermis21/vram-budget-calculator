@@ -8,3 +8,5 @@ multi:
   num_gpus: 1
   parallelism: single
 safety_buffer_gb: 1.0
+release_date: 2022-03-22
+price_usd: 25000

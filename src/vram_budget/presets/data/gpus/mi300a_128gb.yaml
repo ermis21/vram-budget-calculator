@@ -7,3 +7,5 @@ fp8_tflops: 1960.0
 multi: { num_gpus: 1, parallelism: single }
 system_ram_gb: 128.0        # APU: same physical HBM is the system memory
 safety_buffer_gb: 2.0
+release_date: 2023-12-06
+price_usd: 15000

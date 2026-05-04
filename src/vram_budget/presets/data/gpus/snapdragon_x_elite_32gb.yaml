@@ -7,3 +7,5 @@ fp8_tflops: null
 multi: { num_gpus: 1, parallelism: single }
 system_ram_gb: 32.0
 safety_buffer_gb: 2.0
+release_date: 2024-06-18
+price_usd: 1500

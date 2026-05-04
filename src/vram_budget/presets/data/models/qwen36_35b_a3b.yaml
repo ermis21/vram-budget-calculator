@@ -39,3 +39,4 @@ attention:
   rope:
     base_swa: 10000000.0
     base_global: 10000000.0
+release_date: 2025-12-03

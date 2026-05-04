@@ -6,3 +6,5 @@ bf16_tflops: 384.0          # Tenstorrent claim, bf16 dense
 fp8_tflops: 768.0
 multi: { num_gpus: 1, parallelism: single }
 safety_buffer_gb: 1.0
+release_date: 2025-04-08
+price_usd: 1399

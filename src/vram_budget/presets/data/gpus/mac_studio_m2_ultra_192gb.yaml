@@ -7,3 +7,5 @@ fp8_tflops: null
 multi: { num_gpus: 1, parallelism: single }
 system_ram_gb: 192.0        # the full unified pool; CPU and GPU share it
 safety_buffer_gb: 4.0       # Metal driver + macOS keep ~4-8 GB outside the wired GPU limit
+release_date: 2023-06-13
+price_usd: 6000

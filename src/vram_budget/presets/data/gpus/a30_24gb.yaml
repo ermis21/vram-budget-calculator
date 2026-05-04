@@ -6,3 +6,5 @@ bf16_tflops: 100.0          # ~165 fp16 spec; ~100 realized
 fp8_tflops: null
 multi: { num_gpus: 1, parallelism: single }
 safety_buffer_gb: 0.7
+release_date: 2021-04-12
+price_usd: 4000
